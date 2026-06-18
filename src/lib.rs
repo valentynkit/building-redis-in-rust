@@ -18,14 +18,28 @@ fn server_start() -> Result<TcpListener, io::Error> {
     Ok(listener)
 }
 
+struct Client {
+    stream: TcpStream,
+    inbuf: Vec<u8>,
+}
+
 struct Server {
     listener: TcpListener,
-    clients: Vec<TcpStream>,
+    clients: Vec<Client>,
 }
 /// Does this client survive the poll, or get dropped?
 enum Disposition {
     Keep,
     Drop,
+}
+
+impl Client {
+    fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            inbuf: Vec::new(),
+        }
+    }
 }
 
 impl Server {
@@ -38,13 +52,14 @@ impl Server {
 
     fn accept_client(&mut self) {
         match self.listener.accept() {
-            Ok((client, addr)) => {
+            Ok((stream, addr)) => {
                 // Accepted socket does NOT inherit the listener's nonblocking
-                if let Err(e) = client.set_nonblocking(true) {
+                if let Err(e) = stream.set_nonblocking(true) {
                     eprintln!("set_nonblocking({addr}) failed: {e}");
                     return; // client dropped -> fd closed
                 }
-                println!("connected: {addr} (fd {})", client.as_raw_fd());
+                println!("connected: {addr} (fd {})", stream.as_raw_fd());
+                let client = Client::new(stream);
                 self.clients.push(client);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -56,41 +71,30 @@ impl Server {
     fn poll_clients(&mut self) {
         self.clients
             .retain_mut(|c| matches!(handle_client(c), Disposition::Keep));
-        /*
-                let mut i = 0;
-                while i < self.clients.len() {
-                    match handle_client(&mut self.clients[i]) {
-                        Disposition::Keep => i += 1,
-                        Disposition::Drop => {
-                            self.clients.swap_remove(i);
-                        }
-                    }
-                }
-        */
     }
 }
 
-fn handle_client(client: &mut TcpStream) -> Disposition {
+fn handle_client(client: &mut Client) -> Disposition {
     let mut buf = [0u8; 512];
-    match client.read(&mut buf) {
+    match client.stream.read(&mut buf) {
         // EOF: peer closed cleanly
         Ok(0) => {
-            println!("disconnected (fd{})", client.as_raw_fd());
+            println!("disconnected (fd{})", client.stream.as_raw_fd());
             Disposition::Drop
         }
         // TODO extract logic
-        Ok(_n) => match client.write_all(b"+PONG\r\n") {
+        Ok(_n) => match client.stream.write_all(b"+PONG\r\n") {
             Ok(()) => Disposition::Keep,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep,
             Err(e) => {
-                eprintln!("write (fd {}): {e}", client.as_raw_fd());
+                eprintln!("write (fd {}): {e}", client.stream.as_raw_fd());
                 Disposition::Drop
             }
         },
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
         Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
         Err(e) => {
-            eprintln!("read (fd {}): {e}", client.as_raw_fd());
+            eprintln!("read (fd {}): {e}", client.stream.as_raw_fd());
             Disposition::Drop
         }
     }
