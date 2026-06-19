@@ -1,113 +1,40 @@
-use std::io::{self, Read};
-use std::net::TcpStream;
-use std::{io::Write, net::TcpListener, os::fd::AsRawFd};
+mod client;
+mod command;
+mod networking;
+mod resp;
 
-fn server_start() -> Result<TcpListener, io::Error> {
-    let listener = TcpListener::bind("127.0.0.1:6379")?;
-    println!(
-        "Server listening on: {} - fd: {}",
-        listener.local_addr()?,
-        listener.as_raw_fd()
-    );
-    listener.set_nonblocking(true)?;
-    println!(
-        "listening on {} (fd {})",
-        listener.local_addr()?,
-        listener.as_raw_fd()
-    );
-    Ok(listener)
-}
+use networking::{Server, read_event};
+use resp::parse;
+use std::io::{self};
+use std::os::fd::{AsRawFd, RawFd};
 
-struct Client {
-    stream: TcpStream,
-    inbuf: Vec<u8>,
-}
-
-struct Server {
-    listener: TcpListener,
-    clients: Vec<Client>,
-}
-/// Does this client survive the poll, or get dropped?
-enum Disposition {
-    Keep,
-    Drop,
-}
-
-impl Client {
-    fn new(stream: TcpStream) -> Self {
-        Self {
-            stream,
-            inbuf: Vec::new(),
-        }
-    }
-}
-
-impl Server {
-    fn new(listener: TcpListener) -> Self {
-        Self {
-            listener,
-            clients: Vec::new(),
-        }
-    }
-
-    fn accept_client(&mut self) {
-        match self.listener.accept() {
-            Ok((stream, addr)) => {
-                // Accepted socket does NOT inherit the listener's nonblocking
-                if let Err(e) = stream.set_nonblocking(true) {
-                    eprintln!("set_nonblocking({addr}) failed: {e}");
-                    return; // client dropped -> fd closed
-                }
-                println!("connected: {addr} (fd {})", stream.as_raw_fd());
-                let client = Client::new(stream);
-                self.clients.push(client);
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => eprintln!("accept error: {e}"),
-        }
-    }
-
-    fn poll_clients(&mut self) {
-        self.clients
-            .retain_mut(|c| matches!(handle_client(c), Disposition::Keep));
-    }
-}
-
-fn handle_client(client: &mut Client) -> Disposition {
-    let mut buf = [0u8; 512];
-    match client.stream.read(&mut buf) {
-        // EOF: peer closed cleanly
-        Ok(0) => {
-            println!("disconnected (fd{})", client.stream.as_raw_fd());
-            Disposition::Drop
-        }
-        // TODO extract logic
-        Ok(_n) => match client.stream.write_all(b"+PONG\r\n") {
-            Ok(()) => Disposition::Keep,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep,
-            Err(e) => {
-                eprintln!("write (fd {}): {e}", client.stream.as_raw_fd());
-                Disposition::Drop
-            }
-        },
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
-        Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
-        Err(e) => {
-            eprintln!("read (fd {}): {e}", client.stream.as_raw_fd());
-            Disposition::Drop
-        }
-    }
-}
-
+pub const MAX_EVENTS: usize = 64;
 pub fn run() -> Result<(), io::Error> {
-    let mut server = Server::new(server_start()?);
+    let mut server = Server::new()?;
 
+    let mut events = [read_event(0, 0); MAX_EVENTS];
     // Busy-poll
-    // TODO: mio/epoll or switch to tokio
+    // TODO: mio or switch to tokio or any other abstractions.
+    let lfd = server.listener.as_raw_fd();
     loop {
-        server.accept_client();
-        server.poll_clients();
+        // SAFETY: events is a valide [kevent; 64]; NULL timeout = block until ready (0% idle CPU).
+        let n = syscall!(kevent(
+            server.kq,
+            std::ptr::null_mut(),
+            0,
+            events.as_mut_ptr(),
+            events.len() as i32,
+            std::ptr::null()
+        ))?;
+        for ev in &events[..n as usize] {
+            let fd = ev.ident as RawFd;
+            // new connection to server
+            if fd == lfd {
+                server.accept_client();
+            } else {
+                server.service_client(fd);
+            }
+        }
     }
 }
 
