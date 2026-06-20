@@ -4,7 +4,7 @@ use std::net::TcpListener;
 use std::os::fd::{AsRawFd, RawFd};
 
 use crate::client::{Client, Disposition};
-use crate::poll::{self, Poller};
+use crate::poll::Poller;
 
 const ADDR: &str = "127.0.0.1:6379";
 
