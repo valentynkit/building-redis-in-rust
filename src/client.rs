@@ -1,10 +1,9 @@
 use crate::command;
-use crate::command::CommandError;
 use crate::resp;
 use crate::resp::write_error;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 
 pub const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
@@ -55,7 +54,7 @@ impl Client {
 
     /// Drain every complete command from inbuf, then flush replies in one write.
     fn consume(&mut self) -> Disposition {
-        while let Some((args, consumed)) = resp::parse(&self.inbuf) {
+        while let Some((args, consumed)) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..consumed);
             if let Err(err) = command::dispatch(&args, &mut self.outbuf) {
                 write_error(&mut self.outbuf, &err.to_string());
