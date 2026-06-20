@@ -25,23 +25,9 @@ impl Client {
             outbuf: Vec::new(),
         }
     }
-    fn process(&mut self) -> Disposition {
-        while let Some((args, consumed)) = resp::parse(&self.inbuf) {
-            self.inbuf.drain(..consumed);
-            command::dispatch(&args, &mut self.outbuf); // pure args in reply bytes out
-        }
-        self.flush()
-    }
 
-    fn flush(&mut self) -> Disposition {
-        if let Err(e) = self.stream.write_all(&self.outbuf) {
-            eprintln!("flush (fd{}): {e}", self.stream.as_raw_fd());
-            return Disposition::Drop;
-        }
-        Disposition::Keep
-    }
-
-    pub fn handle(&mut self) -> Disposition {
+    /// Poller reported this fd readable: read, parse, run, reply.
+    pub fn on_readable(&mut self) -> Disposition {
         let mut stream = &self.stream;
         let mut buf = [0u8; READ_BUF];
 
@@ -54,7 +40,7 @@ impl Client {
             // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
-                self.process()
+                self.consume()
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
@@ -63,5 +49,24 @@ impl Client {
                 Disposition::Drop
             }
         }
+    }
+
+    /// Drain every complete command from inbuf, then flush replies in one write.
+    fn consume(&mut self) -> Disposition {
+        while let Some((args, consumed)) = resp::parse(&self.inbuf) {
+            self.inbuf.drain(..consumed);
+            command::dispatch(&args, &mut self.outbuf); // pure args in reply bytes out
+        }
+        self.flush()
+    }
+
+    fn flush(&mut self) -> Disposition {
+        if let Err(e) = self.stream.write_all(&self.outbuf) {
+            eprintln!("flush (fd{}): {e}", self.stream.as_raw_fd());
+            return Disposition::Drop;
+        }
+
+        self.outbuf.clear();
+        Disposition::Keep
     }
 }

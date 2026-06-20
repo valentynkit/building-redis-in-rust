@@ -1,12 +1,10 @@
 use std::collections::HashMap;
-use std::io::{self, Read};
-use std::net::TcpStream;
+use std::io::{self};
+use std::net::TcpListener;
 use std::os::fd::{AsRawFd, RawFd};
-use std::{io::Write, net::TcpListener};
 
 use crate::client::{Client, Disposition};
-use crate::command;
-use crate::resp;
+
 #[macro_export]
 macro_rules! syscall {
     ($fn: ident ( $($arg: expr),* $(,)* ) ) => {{
@@ -20,14 +18,13 @@ macro_rules! syscall {
     }};
 }
 
-pub const ADDR: &str = "127.0.0.1:6379";
-pub const MAX_EVENTS: usize = 64;
-pub const MSG_MAX: usize = 4096;
+const ADDR: &str = "127.0.0.1:6379";
+const MAX_EVENTS: usize = 64;
 
 pub struct Server {
-    pub listener: TcpListener,
-    pub clients: HashMap<RawFd, Client>,
-    pub kq: RawFd,
+    listener: TcpListener,
+    clients: HashMap<RawFd, Client>,
+    kq: RawFd,
 }
 
 fn register(kq: RawFd, fd: RawFd) -> io::Result<()> {
@@ -59,7 +56,34 @@ impl Server {
         })
     }
 
-    pub fn accept_client(&mut self) {
+    pub fn run(mut self) -> io::Result<()> {
+        let mut events = [read_event(0, 0); MAX_EVENTS];
+        // Busy-poll
+        // TODO: mio or switch to tokio or any other abstractions.
+        let lfd = self.listener.as_raw_fd();
+        loop {
+            // SAFETY: events is a valide [kevent; 64]; NULL timeout = block until ready (0% idle CPU).
+            let n = syscall!(kevent(
+                self.kq,
+                std::ptr::null_mut(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as i32,
+                std::ptr::null()
+            ))?;
+            for ev in &events[..n as usize] {
+                let fd = ev.ident as RawFd;
+                // new connection to server
+                if fd == lfd {
+                    self.accept_client();
+                } else {
+                    self.service_client(fd);
+                }
+            }
+        }
+    }
+
+    fn accept_client(&mut self) {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
@@ -88,9 +112,9 @@ impl Server {
         }
     }
 
-    pub fn service_client(&mut self, fd: RawFd) {
+    fn service_client(&mut self, fd: RawFd) {
         if let Some(client) = self.clients.get_mut(&fd)
-            && matches!(client.handle(), Disposition::Drop)
+            && matches!(client.on_readable(), Disposition::Drop)
         {
             self.clients.remove(&fd);
         }
@@ -98,7 +122,7 @@ impl Server {
 }
 
 // one EVFILT_READ filter for fd
-pub fn read_event(fd: RawFd, flags: u16) -> libc::kevent {
+fn read_event(fd: RawFd, flags: u16) -> libc::kevent {
     libc::kevent {
         ident: fd as usize,
         filter: libc::EVFILT_READ,
