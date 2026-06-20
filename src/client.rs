@@ -1,5 +1,7 @@
 use crate::command;
+use crate::command::CommandError;
 use crate::resp;
+use crate::resp::write_error;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
@@ -55,7 +57,9 @@ impl Client {
     fn consume(&mut self) -> Disposition {
         while let Some((args, consumed)) = resp::parse(&self.inbuf) {
             self.inbuf.drain(..consumed);
-            command::dispatch(&args, &mut self.outbuf); // pure args in reply bytes out
+            if let Err(err) = command::dispatch(&args, &mut self.outbuf) {
+                write_error(&mut self.outbuf, &err.to_string());
+            }
         }
         self.flush()
     }

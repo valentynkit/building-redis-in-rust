@@ -13,6 +13,25 @@ pub fn parse(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
     Some((args, nl + 1)) //  to also consume the \n
 }
 
+pub fn write_error(out: &mut Vec<u8>, msg: &str) {
+    out.extend_from_slice(b"-ERR ");
+    out.extend_from_slice(msg.as_bytes());
+    out.extend_from_slice(b"\r\n");
+}
+
+pub fn write_simple(out: &mut Vec<u8>, s: &str) {
+    out.push(b'+');
+    out.extend_from_slice(s.as_bytes());
+    out.extend_from_slice(b"\r\n");
+}
+
+pub fn write_bulk(out: &mut Vec<u8>, data: &[u8]) {
+    out.push(b'$');
+    out.extend_from_slice(data.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\r\n");
+}
 #[cfg(test)]
 mod test {
     use super::parse;
