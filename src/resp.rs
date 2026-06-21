@@ -1,22 +1,32 @@
 // find star,
 pub fn parse_resp(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
-    if buf[0] != b'*' {
+    if *buf.first()? != b'*' {
         return None;
     }
     let get_position = |inner_buf: &[u8], ch: u8| inner_buf.iter().position(|&b| b == ch);
     let get_part_end_position = |inner_buf: &[u8]| get_position(inner_buf, b'\r');
     let get_dollar_sign_position = |inner_buf: &[u8]| get_position(inner_buf, b'$');
     let parse_number = |inner_buf: &[u8]| str::from_utf8(inner_buf).ok()?.parse().ok();
+    let validate_part_end = |inner_buf: &[u8]| inner_buf == [b'\r', b'\n'];
     let mut cursor = get_part_end_position(&buf[1..])? + 1;
-    let n_elems: u32 = parse_number(&buf[1..cursor])?;
-    let output: Vec<Vec<u8>> = vec![];
+    let n_elems: usize = parse_number(&buf[1..cursor])?;
+    let mut output: Vec<Vec<u8>> = vec![];
     for _ in 0..n_elems {
         let num_start = cursor + get_dollar_sign_position(&buf[cursor..])? + 1;
         // "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
         cursor = num_start + get_part_end_position(&buf[num_start + 1..])? + 1;
         let part_size = parse_number(&buf[num_start..cursor])?;
+        cursor += 2;
+
+        let part_slice = buf.get(cursor..cursor + part_size)?;
+        cursor += part_size;
+
+        if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+            return None;
+        }
+        cursor += 2;
+        output.push(part_slice.to_vec());
     }
-    while cursor < buf.len() {}
 
     Some((output, cursor))
 }
@@ -61,8 +71,9 @@ mod test {
 
     #[test]
     fn resp_full_line() {
-        let (args, _) = parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
+        let (args, n) = parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
         assert_eq!(args, vec![b"ECHO".to_vec(), b"hey".to_vec()]);
+        assert_eq!(n, 23);
     }
     #[test]
     fn direct_full_line() {
