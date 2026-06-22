@@ -32,12 +32,14 @@ impl Server {
         let lfd = self.listener.as_raw_fd();
 
         loop {
-            let ready_fds = self.poller.wait()?;
-            for fd in ready_fds {
-                if fd == lfd {
-                    self.accept_client();
-                } else {
-                    self.service_client(fd);
+            let events = self.poller.wait()?;
+            for event in events {
+                if event.readable {
+                    if event.fd == lfd {
+                        self.accept_client();
+                    } else {
+                        self.service_client(event.fd);
+                    }
                 }
             }
         }
