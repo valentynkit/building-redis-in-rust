@@ -32,7 +32,7 @@ mod imp {
 
     impl Poller {
         pub fn new() -> io::Result<Self> {
-            let epoll_fd = epoll::jreate(CreateFlags::CLOEXEC)?;
+            let epoll_fd = epoll::create(CreateFlags::CLOEXEC)?;
             Ok(Self {
                 epoll_fd,
                 events: Vec::with_capacity(MAX_EVENTS),
@@ -83,7 +83,7 @@ mod imp {
     use super::*;
     use rustix::{
         buffer::spare_capacity,
-        event::kqueue::{Event, EventFilter, EventFlags, kevent, kqueue},
+        event::kqueue::{kevent, kqueue, Event, EventFilter, EventFlags},
     };
 
     pub struct Poller {
