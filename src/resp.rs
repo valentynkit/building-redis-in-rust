@@ -1,4 +1,5 @@
 // find star,
+
 pub fn parse_resp(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
     if *buf.first()? != b'*' {
         return None;
@@ -46,25 +47,50 @@ pub fn parse_direct(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
     Some((args, nl + 1)) //  to also consume the \n
 }
 
+const END_OF_LINE: &[u8; 2] = b"\r\n";
+
+pub enum ResponseKind<'a> {
+    NULL_BULK,
+    SIMPLE_OK,
+    SIMPLE(&'a str),
+    ERROR(&'a str),
+    BULK(&'a [u8]),
+}
+pub fn write_out(kind: ResponseKind, out: &mut Vec<u8>) {
+    // Each writer emits a fully framed RESP reply (type byte + payload + CRLF).
+    // write_out adds nothing — a blanket trailing CRLF double-terminates bulk/error.
+    match kind {
+        ResponseKind::NULL_BULK => write_null_bulk(out),
+        ResponseKind::SIMPLE_OK => write_simple(out, "OK"),
+        ResponseKind::SIMPLE(str) => write_simple(out, str),
+        ResponseKind::ERROR(str) => write_error(out, str),
+        ResponseKind::BULK(data) => write_bulk(out, data),
+    }
+}
+
+fn write_null_bulk(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"$-1\r\n");
+}
 pub fn write_error(out: &mut Vec<u8>, msg: &str) {
     out.extend_from_slice(b"-ERR ");
     out.extend_from_slice(msg.as_bytes());
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(END_OF_LINE);
 }
 
-pub fn write_simple(out: &mut Vec<u8>, s: &str) {
+fn write_simple(out: &mut Vec<u8>, s: &str) {
     out.push(b'+');
     out.extend_from_slice(s.as_bytes());
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(END_OF_LINE);
 }
 
-pub fn write_bulk(out: &mut Vec<u8>, data: &[u8]) {
+fn write_bulk(out: &mut Vec<u8>, data: &[u8]) {
     out.push(b'$');
     out.extend_from_slice(data.len().to_string().as_bytes());
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(END_OF_LINE);
     out.extend_from_slice(data);
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(END_OF_LINE);
 }
+
 #[cfg(test)]
 mod test {
     use crate::resp::{parse_direct, parse_resp};

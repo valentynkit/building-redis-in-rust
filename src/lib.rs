@@ -1,11 +1,11 @@
 mod client;
 mod command;
+mod db;
 mod networking;
 mod poll;
 mod resp;
 use networking::Server;
-use std::io::{self};
 
-pub fn run() -> Result<(), io::Error> {
+pub fn run() -> Result<(), anyhow::Error> {
     Server::new()?.run()
 }
