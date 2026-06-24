@@ -1,11 +1,14 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 #[derive(Eq, PartialEq)]
 pub struct Value {
     value: String,
 }
 
-#[derive(Eq, Hash, PartialEq)]
+#[derive(Eq, Hash, PartialEq, Clone)]
 pub struct Key {
     value: String,
 }
@@ -35,17 +38,26 @@ impl From<&Value> for Vec<u8> {
 
 pub struct Db {
     keyspace: HashMap<Key, Value>,
-    expires: HashMap<Key, Instant>,
+    expires: HashMap<Key, Duration>,
     start_ms: Instant,
+    realtime_ms: Duration,
 }
 
 impl Db {
-    pub fn create(start_ms: Instant) -> Self {
+    pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
         Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
             start_ms,
+            realtime_ms,
         }
+    }
+    pub fn update_time(&mut self, realtime_ms: Duration) {
+        self.realtime_ms = realtime_ms;
+    }
+
+    pub fn realtime_ms(&self) -> Duration {
+        self.realtime_ms
     }
 
     pub fn remove(&mut self, key: &Key) {
@@ -58,7 +70,15 @@ impl Db {
         self.keyspace.get(&key)
     }
 
-    pub fn set(&mut self, key: Key, value: Value) -> Option<Value> {
+    fn set(&mut self, key: Key, value: Value) -> Option<Value> {
         self.keyspace.insert(key, value)
+    }
+
+    pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) -> Option<Value> {
+        if let Some(ex) = ex_at {
+            self.expires.insert(key.clone(), ex);
+        }
+
+        self.set(key, value)
     }
 }
