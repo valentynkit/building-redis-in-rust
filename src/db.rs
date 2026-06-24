@@ -3,6 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use thiserror::Error;
+
 #[derive(Eq, PartialEq)]
 pub struct Value {
     value: String,
@@ -13,6 +15,8 @@ pub struct Key {
     value: String,
 }
 
+#[derive(Debug, Error, Clone)]
+pub enum DbError {}
 impl From<&Vec<u8>> for Key {
     fn from(value: &Vec<u8>) -> Self {
         Self {
@@ -65,8 +69,24 @@ impl Db {
         self.expires.remove(key);
     }
 
+    // Lazy Epiration
+    fn expire_clean(&mut self, key: &Key) -> bool {
+        let is_expired = self
+            .expires
+            .get(key)
+            .is_some_and(|&exp| exp <= self.realtime_ms);
+
+        if is_expired {
+            self.remove(key);
+        }
+
+        is_expired
+    }
     // TODO: Add lazy expiration here.
-    pub fn get(&self, key: &Key) -> Option<&Value> {
+    pub fn get(&mut self, key: &Key) -> Option<&Value> {
+        if self.expire_clean(key) {
+            return None;
+        }
         self.keyspace.get(&key)
     }
 
