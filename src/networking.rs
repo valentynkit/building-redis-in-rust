@@ -16,9 +16,7 @@ pub struct Server {
     clients: HashMap<RawFd, Client>,
     poller: Poller,
     db: Db,
-    monotonic_ms: Instant,
     start_ms: Instant,
-    realtime_ms: Duration,
 }
 
 impl Server {
@@ -34,21 +32,20 @@ impl Server {
         let realtime_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("reading wall clock")?;
-        let db = Db::create(start_ms);
+
+        let db = Db::create(start_ms, realtime_ms);
         Ok(Self {
             listener,
             clients: HashMap::new(),
             poller,
             db,
-            monotonic_ms,
             start_ms,
-            realtime_ms,
         })
     }
     fn set_current_time(&mut self) -> Result<()> {
-        self.realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
-        self.monotonic_ms = Instant::now();
+        self.db.update_time(realtime_ms);
         Ok(())
     }
     pub fn run(mut self) -> Result<()> {

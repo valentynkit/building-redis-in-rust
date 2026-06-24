@@ -1,5 +1,6 @@
 use crate::db::{Db, Key, Value};
 use crate::resp::{self, ResponseKind};
+use std::time::Duration;
 use std::{
     env::args,
     io::{self},
@@ -7,12 +8,14 @@ use std::{
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum CommandError {
     #[error("unknown command '{0}'")]
     Unknown(String),
     #[error("wrong number of arguments for '{0}', expected: '{1}'")]
     WrongArity(String, String),
+    #[error("wrong argument format: expected number. actual '{0}'")]
+    WrongNumber(String),
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -78,7 +81,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
         Command::Echo => resp::write_out(ResponseKind::BULK(&args[1..].join(&b' ')), out),
         Command::Set => {
             if (args.len() > 3) {
-                cmd_setex(db, &args[1], &args[2], &args[3], &args[4]);
+                cmd_setex(db, &args[1], &args[2], &args[3], &args[4])?;
             } else {
                 cmd_set(db, &args[1], &args[2]);
             }
@@ -98,13 +101,40 @@ fn cmd_get(db: &Db, key: &Vec<u8>) -> Option<Vec<u8>> {
     Some(value.into()) // &Value → Vec<u8> via the reverse From impl
 }
 
-fn cmd_setex(db: &mut Db, key: &Vec<u8>, value: &Vec<u8>, exp_cmd: &Vec<u8>, exp: &Vec<u8>) {
-    cmd_set(db, key, value);
+fn cmd_setex(
+    db: &mut Db,
+    key: &Vec<u8>,
+    value: &Vec<u8>,
+    exp_cmd: &Vec<u8>,
+    exp: &Vec<u8>,
+) -> Result<(), CommandError> {
+    let exp_cmd = ExpCmd::from_bytes(exp_cmd)
+        .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(exp_cmd).into_owned()))?;
+
+    let number_err = CommandError::WrongNumber(String::from_utf8_lossy(exp).into());
+
+    let mut exp_number: u64 = String::from_utf8(exp.to_owned())
+        .ok()
+        .ok_or_else(|| number_err.clone())?
+        .parse()
+        .ok()
+        .ok_or_else(|| number_err.clone())?;
+
+    match exp_cmd {
+        ExpCmd::Px => {}
+        ExpCmd::Ex => exp_number *= 1000,
+    }
+
+    let exp_at: Duration = db.realtime_ms() + Duration::from_millis(exp_number);
+    let key: Key = key.into();
+    let value: Value = value.into();
+    db.setex(key, value, Some(exp_at));
+    Ok(())
 
     // exp_cmd could be EX or PX. EX = seconds, PX = milisseconds.
 }
 fn cmd_set(db: &mut Db, key: &Vec<u8>, value: &Vec<u8>) {
     let key: Key = key.into();
     let value: Value = value.into();
-    db.set(key, value);
+    db.setex(key, value, None);
 }
