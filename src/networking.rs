@@ -52,8 +52,8 @@ impl Server {
         let lfd = self.listener.as_raw_fd();
 
         loop {
-            self.set_current_time()?;
             let events = self.poller.wait()?;
+            self.set_current_time()?;
             for event in events {
                 if event.readable {
                     if event.fd == lfd {
