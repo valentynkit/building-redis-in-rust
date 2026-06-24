@@ -95,7 +95,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
 
     Ok(())
 }
-fn cmd_get(db: &Db, key: &Vec<u8>) -> Option<Vec<u8>> {
+fn cmd_get(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
     let key: Key = key.into();
     let value = db.get(&key)?; // None → key absent → caller writes $-1
     Some(value.into()) // &Value → Vec<u8> via the reverse From impl
