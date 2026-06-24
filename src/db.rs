@@ -42,6 +42,7 @@ impl From<&Value> for Vec<u8> {
 
 pub struct Db {
     keyspace: HashMap<Key, Value>,
+    lists: HashMap<Key, Vec<Value>>,
     expires: HashMap<Key, Duration>,
     start_ms: Instant,
     realtime_ms: Duration,
@@ -52,6 +53,7 @@ impl Db {
         Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
+            lists: HashMap::new(),
             start_ms,
             realtime_ms,
         }
@@ -68,6 +70,11 @@ impl Db {
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
+    pub fn upsert_elem(&mut self, key: Key, elem: Value) -> i64 {
+        let list = self.lists.entry(key).or_default();
+        list.push(elem);
+        list.len() as i64
+    }
 
     // Lazy Epiration
     fn expire_clean(&mut self, key: &Key) -> bool {
@@ -82,7 +89,7 @@ impl Db {
 
         is_expired
     }
-    // TODO: Add lazy expiration here.
+
     pub fn get(&mut self, key: &Key) -> Option<&Value> {
         if self.expire_clean(key) {
             return None;

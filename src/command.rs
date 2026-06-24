@@ -25,6 +25,7 @@ pub enum Command {
     Echo,
     Set,
     Get,
+    Rpush,
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -62,6 +63,7 @@ impl Command {
             Command::Echo => -1,
             Command::Set => -3,
             Command::Get => 2,
+            Command::Rpush => 3,
         }
     }
 }
@@ -91,9 +93,21 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             Some(v) => resp::write_out(ResponseKind::BULK(&v), out),
             None => resp::write_out(ResponseKind::NULL_BULK, out),
         },
+        Command::Rpush => {
+            let len = cmd_rpush(db, &args[1], &args[2]);
+            resp::write_out(ResponseKind::Int(len), out);
+        }
     };
 
     Ok(())
+}
+
+// TODO: actual resp value comes in "val" not just val. currently we process only val case without
+// ""
+fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elem: &Vec<u8>) -> i64 {
+    let key: Key = key.into();
+    let elem: Value = elem.into();
+    db.upsert_elem(key, elem)
 }
 fn cmd_get(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
     let key: Key = key.into();

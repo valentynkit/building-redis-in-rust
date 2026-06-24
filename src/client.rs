@@ -1,7 +1,6 @@
 use crate::command;
 use crate::db::Db;
-use crate::resp;
-use crate::resp::write_error;
+use crate::resp::{self, ResponseKind};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
@@ -58,7 +57,10 @@ impl Client {
         while let Some((args, consumed)) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..consumed);
             if let Err(err) = command::dispatch(db, &args, &mut self.outbuf) {
-                write_error(&mut self.outbuf, &err.to_string());
+                resp::write_out(
+                    ResponseKind::ERROR(err.to_string().as_ref()),
+                    &mut self.outbuf,
+                );
             }
         }
         self.flush()
@@ -81,10 +83,14 @@ mod test {
     use crate::db::Db;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::time::Instant;
+    use std::time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH};
 
     fn db() -> Db {
-        Db::create(Instant::now())
+        let realtime_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime::now should work with durion since UNIX_EPOCH");
+
+        Db::create(Instant::now(), realtime_ms)
     }
 
     /// Encode a command as a RESP array of bulk strings — what real clients send.

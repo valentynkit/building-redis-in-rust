@@ -55,6 +55,7 @@ pub enum ResponseKind<'a> {
     SIMPLE(&'a str),
     ERROR(&'a str),
     BULK(&'a [u8]),
+    Int(i64),
 }
 pub fn write_out(kind: ResponseKind, out: &mut Vec<u8>) {
     // Each writer emits a fully framed RESP reply (type byte + payload + CRLF).
@@ -65,13 +66,21 @@ pub fn write_out(kind: ResponseKind, out: &mut Vec<u8>) {
         ResponseKind::SIMPLE(str) => write_simple(out, str),
         ResponseKind::ERROR(str) => write_error(out, str),
         ResponseKind::BULK(data) => write_bulk(out, data),
+        ResponseKind::Int(num) => write_int(out, num),
     }
 }
-
+fn write_int(out: &mut Vec<u8>, num: i64) {
+    let sign = if num < 0 { b'-' } else { b'+' };
+    out.push(b':');
+    out.push(sign);
+    out.extend_from_slice(num.to_string().as_bytes());
+    out.extend_from_slice(END_OF_LINE);
+}
 fn write_null_bulk(out: &mut Vec<u8>) {
     out.extend_from_slice(b"$-1\r\n");
 }
-pub fn write_error(out: &mut Vec<u8>, msg: &str) {
+
+fn write_error(out: &mut Vec<u8>, msg: &str) {
     out.extend_from_slice(b"-ERR ");
     out.extend_from_slice(msg.as_bytes());
     out.extend_from_slice(END_OF_LINE);
