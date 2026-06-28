@@ -81,7 +81,13 @@ impl Db {
     pub fn list_get(&self, key: Key, from: usize, to: usize) -> &[Value] {
         self.lists
             .get(&key)
-            .and_then(|l| l.get(from..=to))
+            .and_then(|l| {
+                if l.is_empty() {
+                    return None;
+                }
+                let to = to.min(l.len() - 1);
+                l.get(from..=to)
+            })
             .unwrap_or_default()
     }
     // Lazy Epiration
