@@ -101,11 +101,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
         }
         Command::Lrange => {
             let values = cmd_lrange(db, &args[1], &args[2], &args[3])?;
-            if values.is_empty() {
-                resp::write_out(ResponseKind::NULL_BULK, out);
-            } else {
-                resp::write_out(ResponseKind::ARRAY(values), out);
-            }
+            resp::write_out(ResponseKind::ARRAY(values), out);
         }
     }
 
