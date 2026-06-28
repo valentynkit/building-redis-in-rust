@@ -26,6 +26,7 @@ pub enum Command {
     Set,
     Get,
     Rpush,
+    Lrange,
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -59,11 +60,12 @@ impl Command {
 
     fn arity(&self) -> i32 {
         match self {
-            Command::Ping => 1,
-            Command::Echo => -1,
-            Command::Set => -3,
-            Command::Get => 2,
-            Command::Rpush => -3,
+            Self::Ping => 1,
+            Self::Echo => -1,
+            Self::Set => -3,
+            Self::Get => 2,
+            Self::Rpush => -3,
+            Self::Lrange => 4,
         }
     }
 }
@@ -80,7 +82,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
     match cmd {
         Command::Ping => resp::write_out(ResponseKind::SIMPLE("PONG"), out),
         // TODO after resp update
-        Command::Echo => resp::write_out(ResponseKind::BULK(&args[1..].join(&b' ')), out),
+        Command::Echo => resp::write_out(ResponseKind::STR(&args[1..].join(&b' ')), out),
         Command::Set => {
             if args.len() > 3 {
                 cmd_setex(db, &args[1], &args[2], &args[3], &args[4])?;
@@ -90,12 +92,20 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             resp::write_out(ResponseKind::SIMPLE_OK, out);
         }
         Command::Get => match cmd_get(db, &args[1]) {
-            Some(v) => resp::write_out(ResponseKind::BULK(&v), out),
+            Some(v) => resp::write_out(ResponseKind::STR(&v), out),
             None => resp::write_out(ResponseKind::NULL_BULK, out),
         },
         Command::Rpush => {
             let len = cmd_rpush(db, &args[1], &args[2..args.len()]);
             resp::write_out(ResponseKind::Int(len), out);
+        }
+        Command::Lrange => {
+            let values = cmd_lrange(db, &args[1], &args[2], &args[3])?;
+            if values.is_empty() {
+                resp::write_out(ResponseKind::NULL_BULK, out);
+            } else {
+                resp::write_out(ResponseKind::ARRAY(values), out);
+            }
         }
     }
 
@@ -103,11 +113,46 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
 }
 
 // TODO: actual resp value comes in "val" not just val. currently we process only val case without
+//
 // ""
 fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(Into::into).collect();
-    db.upsert_elem(key, elems)
+    db.list_upsert(key, elems)
+}
+
+fn cmd_lrange(
+    db: &Db,
+    key: &Vec<u8>,
+    num_from: &Vec<u8>,
+    num_to: &Vec<u8>,
+) -> Result<Vec<Vec<u8>>, CommandError> {
+    let key: Key = key.into();
+    // TODO: this should be refactored
+    let mut num_err = CommandError::WrongNumber(String::from_utf8_lossy(num_from).into());
+
+    let num_from: usize = String::from_utf8(num_from.to_owned())
+        .ok()
+        .ok_or_else(|| num_err.clone())?
+        .parse()
+        .ok()
+        .ok_or_else(|| num_err.clone())?;
+
+    num_err = CommandError::WrongNumber(String::from_utf8_lossy(num_to).into());
+
+    let num_to: usize = String::from_utf8(num_to.to_owned())
+        .ok()
+        .ok_or_else(|| num_err.clone())?
+        .parse()
+        .ok()
+        .ok_or_else(|| num_err.clone())?;
+
+    let items = db
+        .list_get(key, num_from, num_to)
+        .iter()
+        .map(|item| item.into())
+        .collect();
+    Ok(items)
 }
 fn cmd_get(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
     let key: Key = key.into();

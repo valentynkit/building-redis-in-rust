@@ -66,12 +66,24 @@ impl Db {
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
-    pub fn upsert_elem(&mut self, key: Key, elems: Vec<Value>) -> i64 {
+
+    pub fn list_upsert(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
         list.extend(elems);
         list.len() as i64
     }
 
+    // TODO: potential improvements:
+    // 1: when there are 3 elements, but range is 0-9 redis will not
+    // error but return all the existing elements in this range
+    // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
+    // the key has no elements
+    pub fn list_get(&self, key: Key, from: usize, to: usize) -> &[Value] {
+        self.lists
+            .get(&key)
+            .and_then(|l| l.get(from..to))
+            .unwrap_or_default()
+    }
     // Lazy Epiration
     fn expire_clean(&mut self, key: &Key) -> bool {
         let is_expired = self
