@@ -84,7 +84,6 @@ fn write_arr(out: &mut Vec<u8>, items: Vec<Vec<u8>>) {
 fn write_int(out: &mut Vec<u8>, num: i64) {
     let sign = if num < 0 { b'-' } else { b'+' };
     out.push(b':');
-    out.push(sign);
     out.extend_from_slice(num.to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);
 }

@@ -86,16 +86,16 @@ impl Db {
                     return None;
                 }
                 if from < 0 {
-                    from = l.len() as i32 - from;
+                    from = l.len() as i32 + from;
                     if from < 0 {
                         from = 0;
                     }
                 }
 
                 if to < 0 {
-                    to = l.len() as i32 - to;
+                    to = l.len() as i32 + to;
                     if to < 0 || to < from {
-                        to = 0;
+                        return None;
                     }
                 }
                 let from: usize = from as usize;
