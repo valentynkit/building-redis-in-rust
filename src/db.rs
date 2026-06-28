@@ -3,8 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use thiserror::Error;
-
 #[derive(Eq, PartialEq)]
 pub struct Value {
     value: String,
@@ -15,8 +13,6 @@ pub struct Key {
     value: String,
 }
 
-#[derive(Debug, Error, Clone)]
-pub enum DbError {}
 impl From<&Vec<u8>> for Key {
     fn from(value: &Vec<u8>) -> Self {
         Self {
@@ -70,9 +66,9 @@ impl Db {
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
-    pub fn upsert_elem(&mut self, key: Key, elem: Value) -> i64 {
+    pub fn upsert_elem(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
-        list.push(elem);
+        list.extend(elems);
         list.len() as i64
     }
 
@@ -94,7 +90,7 @@ impl Db {
         if self.expire_clean(key) {
             return None;
         }
-        self.keyspace.get(&key)
+        self.keyspace.get(key)
     }
 
     fn set(&mut self, key: Key, value: Value) -> Option<Value> {

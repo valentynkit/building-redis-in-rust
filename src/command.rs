@@ -63,7 +63,7 @@ impl Command {
             Command::Echo => -1,
             Command::Set => -3,
             Command::Get => 2,
-            Command::Rpush => 3,
+            Command::Rpush => -3,
         }
     }
 }
@@ -82,7 +82,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
         // TODO after resp update
         Command::Echo => resp::write_out(ResponseKind::BULK(&args[1..].join(&b' ')), out),
         Command::Set => {
-            if (args.len() > 3) {
+            if args.len() > 3 {
                 cmd_setex(db, &args[1], &args[2], &args[3], &args[4])?;
             } else {
                 cmd_set(db, &args[1], &args[2]);
@@ -94,20 +94,20 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             None => resp::write_out(ResponseKind::NULL_BULK, out),
         },
         Command::Rpush => {
-            let len = cmd_rpush(db, &args[1], &args[2]);
+            let len = cmd_rpush(db, &args[1], &args[2..args.len()]);
             resp::write_out(ResponseKind::Int(len), out);
         }
-    };
+    }
 
     Ok(())
 }
 
 // TODO: actual resp value comes in "val" not just val. currently we process only val case without
 // ""
-fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elem: &Vec<u8>) -> i64 {
+fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
     let key: Key = key.into();
-    let elem: Value = elem.into();
-    db.upsert_elem(key, elem)
+    let elems: Vec<Value> = elems.iter().map(Into::into).collect();
+    db.upsert_elem(key, elems)
 }
 fn cmd_get(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
     let key: Key = key.into();
