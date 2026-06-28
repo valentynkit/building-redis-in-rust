@@ -26,6 +26,7 @@ pub enum Command {
     Set,
     Get,
     Rpush,
+    Lpush,
     Lrange,
 }
 
@@ -64,7 +65,7 @@ impl Command {
             Self::Echo => -1,
             Self::Set => -3,
             Self::Get => 2,
-            Self::Rpush => -3,
+            Self::Rpush | Self::Lpush => -3,
             Self::Lrange => 4,
         }
     }
@@ -99,6 +100,10 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             let len = cmd_rpush(db, &args[1], &args[2..args.len()]);
             resp::write_out(ResponseKind::Int(len), out);
         }
+        Command::Lpush => {
+            let len = cmd_lpush(db, &args[1], &args[2..args.len()]);
+            resp::write_out(ResponseKind::Int(len), out);
+        }
         Command::Lrange => {
             let values = cmd_lrange(db, &args[1], &args[2], &args[3])?;
             resp::write_out(ResponseKind::ARRAY(values), out);
@@ -108,13 +113,16 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
     Ok(())
 }
 
-// TODO: actual resp value comes in "val" not just val. currently we process only val case without
-//
-// ""
 fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(Into::into).collect();
-    db.list_upsert(key, elems)
+    db.list_append(key, elems)
+}
+
+fn cmd_lpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
+    let key: Key = key.into();
+    let elems: Vec<Value> = elems.iter().map(Into::into).collect();
+    db.list_prepand(key, elems)
 }
 
 fn cmd_lrange(

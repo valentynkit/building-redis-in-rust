@@ -66,8 +66,13 @@ impl Db {
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
+    pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> i64 {
+        let list = self.lists.entry(key).or_default();
+        list.splice(0..0, elems.into_iter().rev());
+        list.len() as i64
+    }
 
-    pub fn list_upsert(&mut self, key: Key, elems: Vec<Value>) -> i64 {
+    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
         list.extend(elems);
         list.len() as i64
