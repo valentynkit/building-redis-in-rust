@@ -78,13 +78,28 @@ impl Db {
     // error but return all the existing elements in this range
     // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
     // the key has no elements
-    pub fn list_get(&self, key: Key, from: usize, to: usize) -> &[Value] {
+    pub fn list_get(&self, key: Key, mut from: i32, mut to: i32) -> &[Value] {
         self.lists
             .get(&key)
             .and_then(|l| {
                 if l.is_empty() {
                     return None;
                 }
+                if from < 0 {
+                    from = l.len() as i32 - from;
+                    if from < 0 {
+                        from = 0;
+                    }
+                }
+
+                if to < 0 {
+                    to = l.len() as i32 - to;
+                    if to < 0 || to < from {
+                        to = 0;
+                    }
+                }
+                let from: usize = from as usize;
+                let to: usize = to as usize;
                 let to = to.min(l.len() - 1);
                 l.get(from..=to)
             })
