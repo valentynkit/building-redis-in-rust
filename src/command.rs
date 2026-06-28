@@ -127,7 +127,7 @@ fn cmd_lrange(
     // TODO: this should be refactored
     let mut num_err = CommandError::WrongNumber(String::from_utf8_lossy(num_from).into());
 
-    let num_from: usize = String::from_utf8(num_from.to_owned())
+    let num_from: i32 = String::from_utf8(num_from.to_owned())
         .ok()
         .ok_or_else(|| num_err.clone())?
         .parse()
@@ -136,7 +136,7 @@ fn cmd_lrange(
 
     num_err = CommandError::WrongNumber(String::from_utf8_lossy(num_to).into());
 
-    let num_to: usize = String::from_utf8(num_to.to_owned())
+    let num_to: i32 = String::from_utf8(num_to.to_owned())
         .ok()
         .ok_or_else(|| num_err.clone())?
         .parse()
