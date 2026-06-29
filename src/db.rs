@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -38,7 +38,7 @@ impl From<&Value> for Vec<u8> {
 
 pub struct Db {
     keyspace: HashMap<Key, Value>,
-    lists: HashMap<Key, Vec<Value>>,
+    lists: HashMap<Key, VecDeque<Value>>,
     expires: HashMap<Key, Duration>,
     start_ms: Instant,
     realtime_ms: Duration,
@@ -68,15 +68,20 @@ impl Db {
     }
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
-        list.splice(0..0, elems.into_iter().rev());
+        elems.into_iter().rev().for_each(|e| list.push_front(e));
         list.len() as i64
     }
+
     pub fn list_len(&self, key: Key) -> i64 {
         let list = self.lists.get(&key);
 
         list.map_or(0, |list| list.len() as i64)
     }
 
+    pub fn list_pop(&mut self, key: &Key) -> Option<Value> {
+        let list = self.lists.get_mut(key);
+        list.map_or(None, |list| list.pop_front())
+    }
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
         list.extend(elems);
@@ -88,32 +93,27 @@ impl Db {
     // error but return all the existing elements in this range
     // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
     // the key has no elements
-    pub fn list_get(&self, key: Key, mut from: i32, mut to: i32) -> &[Value] {
-        self.lists
-            .get(&key)
-            .and_then(|l| {
-                if l.is_empty() {
-                    return None;
-                }
-                if from < 0 {
-                    from = l.len() as i32 + from;
-                    if from < 0 {
-                        from = 0;
-                    }
-                }
-
-                if to < 0 {
-                    to = l.len() as i32 + to;
-                    if to < 0 || to < from {
-                        return None;
-                    }
-                }
-                let from: usize = from as usize;
-                let to: usize = to as usize;
-                let to = to.min(l.len() - 1);
-                l.get(from..=to)
-            })
-            .unwrap_or_default()
+    pub fn list_get(&self, key: Key, mut from: i32, mut to: i32) -> Vec<&Value> {
+        let Some(l) = self.lists.get(&key) else {
+            return Vec::new();
+        };
+        let len = l.len() as i32;
+        if l.is_empty() {
+            return Vec::new();
+        }
+        if from < 0 {
+            from = len as i32 + from;
+            if from < 0 {
+                from = 0;
+            }
+        }
+        if to < 0 {
+            to = len as i32 + to;
+            if to < 0 || to < from {
+                return Vec::new();
+            }
+        }
+        l.range(from as usize..=to as usize).collect()
     }
     // Lazy Epiration
     fn expire_clean(&mut self, key: &Key) -> bool {

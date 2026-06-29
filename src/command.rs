@@ -29,6 +29,7 @@ pub enum Command {
     Lpush,
     Lrange,
     Llen,
+    Lpop,
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -68,7 +69,7 @@ impl Command {
             Self::Get => 2,
             Self::Rpush | Self::Lpush => -3,
             Self::Lrange => 4,
-            Self::Llen => 2,
+            Self::Llen | Self::Lpop => 2,
         }
     }
 }
@@ -114,9 +115,18 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             let len = cmd_llen(db, &args[1]);
             resp::write_out(ResponseKind::Int(len), out);
         }
+        Command::Lpop => {
+            let value = cmd_lpop(db, &args[1]);
+        }
     }
 
     Ok(())
+}
+
+fn cmd_lpop(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
+    let key: Key = key.into();
+    let value = db.list_pop(&key)?;
+    Some((&value).into())
 }
 
 fn cmd_llen(db: &Db, key: &Vec<u8>) -> i64 {
@@ -164,7 +174,7 @@ fn cmd_lrange(
     let items = db
         .list_get(key, num_from, num_to)
         .iter()
-        .map(|item| item.into())
+        .map(|&item| item.into())
         .collect();
     Ok(items)
 }
