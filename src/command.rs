@@ -28,6 +28,7 @@ pub enum Command {
     Rpush,
     Lpush,
     Lrange,
+    Llen,
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -67,6 +68,7 @@ impl Command {
             Self::Get => 2,
             Self::Rpush | Self::Lpush => -3,
             Self::Lrange => 4,
+            Self::Llen => 2,
         }
     }
 }
@@ -108,11 +110,19 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             let values = cmd_lrange(db, &args[1], &args[2], &args[3])?;
             resp::write_out(ResponseKind::ARRAY(values), out);
         }
+        Command::Llen => {
+            let len = cmd_llen(db, &args[1]);
+            resp::write_out(ResponseKind::Int(len), out);
+        }
     }
 
     Ok(())
 }
 
+fn cmd_llen(db: &Db, key: &Vec<u8>) -> i64 {
+    let key: Key = key.into();
+    db.list_len(key)
+}
 fn cmd_rpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(Into::into).collect();
