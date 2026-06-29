@@ -118,9 +118,20 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
         }
         Command::Lpop => {
             let values = cmd_lpop(db, &args[1], args.get(2));
+            let Some(values) = values else {
+                resp::write_out(ResponseKind::NULL_BULK, out);
+                return Ok(());
+            };
             match values {
-                Some(val) => resp::write_out(ResponseKind::ARRAY(val), out),
-                None => resp::write_out(ResponseKind::NULL_BULK, out),
+                _ if values.is_empty() => {
+                    resp::write_out(ResponseKind::NULL_BULK, out);
+                }
+                _ if values.len() == 1 => {
+                    resp::write_out(ResponseKind::STR(&values[0]), out);
+                }
+                _ => {
+                    resp::write_out(ResponseKind::ARRAY(values), out);
+                }
             }
         }
     }
