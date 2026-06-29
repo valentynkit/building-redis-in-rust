@@ -69,7 +69,8 @@ impl Command {
             Self::Get => 2,
             Self::Rpush | Self::Lpush => -3,
             Self::Lrange => 4,
-            Self::Llen | Self::Lpop => 2,
+            Self::Llen => 2,
+            Self::Lpop => -2,
         }
     }
 }
@@ -116,9 +117,9 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             resp::write_out(ResponseKind::Int(len), out);
         }
         Command::Lpop => {
-            let value = cmd_lpop(db, &args[1]);
-            match value {
-                Some(val) => resp::write_out(ResponseKind::STR(&val), out),
+            let values = cmd_lpop(db, &args[1], &args[2]);
+            match values {
+                Some(val) => resp::write_out(ResponseKind::ARRAY(val), out),
                 None => resp::write_out(ResponseKind::NULL_BULK, out),
             }
         }
@@ -127,10 +128,17 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
     Ok(())
 }
 
-fn cmd_lpop(db: &mut Db, key: &Vec<u8>) -> Option<Vec<u8>> {
+fn cmd_lpop(db: &mut Db, key: &Vec<u8>, num: &Vec<u8>) -> Option<Vec<Vec<u8>>> {
     let key: Key = key.into();
-    let value = db.list_pop(&key)?;
-    Some((&value).into())
+
+    let num: usize = String::from_utf8(num.to_owned()).ok()?.parse().ok()?;
+
+    let values: Vec<Vec<u8>> = db
+        .list_pop(&key, num)
+        .iter()
+        .map(|value| value.into())
+        .collect();
+    Some(values)
 }
 
 fn cmd_llen(db: &Db, key: &Vec<u8>) -> i64 {
@@ -149,6 +157,8 @@ fn cmd_lpush(db: &mut Db, key: &Vec<u8>, elems: &[Vec<u8>]) -> i64 {
     db.list_prepand(key, elems)
 }
 
+//
+// TODO: refactor, do we really need result here? or could have similar pattern to LPOP
 fn cmd_lrange(
     db: &Db,
     key: &Vec<u8>,
