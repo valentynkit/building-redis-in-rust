@@ -117,7 +117,7 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
             resp::write_out(ResponseKind::Int(len), out);
         }
         Command::Lpop => {
-            let values = cmd_lpop(db, &args[1], &args[2]);
+            let values = cmd_lpop(db, &args[1], args.get(2));
             match values {
                 Some(val) => resp::write_out(ResponseKind::ARRAY(val), out),
                 None => resp::write_out(ResponseKind::NULL_BULK, out),
@@ -128,16 +128,21 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
     Ok(())
 }
 
-fn cmd_lpop(db: &mut Db, key: &Vec<u8>, num: &Vec<u8>) -> Option<Vec<Vec<u8>>> {
+fn cmd_lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Option<Vec<Vec<u8>>> {
     let key: Key = key.into();
 
-    let num: usize = String::from_utf8(num.to_owned()).ok()?.parse().ok()?;
+    let num_parsed: usize = if let Some(num) = num {
+        String::from_utf8(num.to_owned()).ok()?.parse().ok()?
+    } else {
+        1
+    };
 
     let values: Vec<Vec<u8>> = db
-        .list_pop(&key, num)
+        .list_pop(&key, num_parsed)
         .iter()
-        .map(|value| value.into())
+        .map(Into::into)
         .collect();
+
     Some(values)
 }
 
