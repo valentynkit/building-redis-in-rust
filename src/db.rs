@@ -78,10 +78,21 @@ impl Db {
         list.map_or(0, |list| list.len() as i64)
     }
 
-    pub fn list_pop(&mut self, key: &Key) -> Option<Value> {
-        let list = self.lists.get_mut(key);
-        list.map_or(None, |list| list.pop_front())
+    pub fn list_pop(&mut self, key: &Key, len: usize) -> Vec<Value> {
+        let mut out: Vec<Value> = vec![];
+        let Some(list) = self.lists.get_mut(key) else {
+            return out;
+        };
+
+        let len = len.min(list.len() - 1);
+        for _ in 0..len {
+            if let Some(item) = list.pop_front() {
+                out.push(item);
+            }
+        }
+        out
     }
+
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
         list.extend(elems);
