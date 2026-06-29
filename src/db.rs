@@ -113,6 +113,7 @@ impl Db {
                 return Vec::new();
             }
         }
+        let to = to.min(len - 1);
         l.range(from as usize..=to as usize).collect()
     }
     // Lazy Epiration
