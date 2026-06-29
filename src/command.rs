@@ -117,6 +117,10 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
         }
         Command::Lpop => {
             let value = cmd_lpop(db, &args[1]);
+            match value {
+                Some(val) => resp::write_out(ResponseKind::STR(&val), out),
+                None => resp::write_out(ResponseKind::NULL_BULK, out),
+            }
         }
     }
 
