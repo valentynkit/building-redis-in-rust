@@ -71,6 +71,11 @@ impl Db {
         list.splice(0..0, elems.into_iter().rev());
         list.len() as i64
     }
+    pub fn list_len(&self, key: Key) -> i64 {
+        let list = self.lists.get(&key);
+
+        list.map_or(0, |list| list.len() as i64)
+    }
 
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
