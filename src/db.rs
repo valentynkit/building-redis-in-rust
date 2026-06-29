@@ -68,7 +68,7 @@ impl Db {
     }
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> i64 {
         let list = self.lists.entry(key).or_default();
-        elems.into_iter().rev().for_each(|e| list.push_front(e));
+        elems.into_iter().for_each(|e| list.push_front(e));
         list.len() as i64
     }
 
