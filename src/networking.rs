@@ -48,12 +48,24 @@ impl Server {
         self.db.update_time(realtime_ms);
         Ok(())
     }
+    // HouseKeeping
+    fn before_sleep(&mut self) -> Result<()> {
+        self.set_current_time()?;
+        let waiters = self.db.handle_waiters();
+        for (client_fd, value) in waiters {
+            if let Some(client) = self.clients.get_mut(&client_fd) {
+                client.write_response((&value).into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn run(mut self) -> Result<()> {
         let lfd = self.listener.as_raw_fd();
 
         loop {
+            self.before_sleep()?;
             let events = self.poller.wait()?;
-            self.set_current_time()?;
             for event in events {
                 if event.readable {
                     if event.fd == lfd {

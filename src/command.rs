@@ -1,5 +1,6 @@
 use crate::db::{Db, Key, Value};
 use crate::resp::{self, ResponseKind};
+use std::os::fd::RawFd;
 use std::time::Duration;
 use std::{
     env::args,
@@ -30,6 +31,7 @@ pub enum Command {
     Lrange,
     Llen,
     Lpop,
+    Blpop,
 }
 
 #[derive(AsRefStr, EnumString)]
@@ -71,12 +73,18 @@ impl Command {
             Self::Lrange => 4,
             Self::Llen => 2,
             Self::Lpop => -2,
+            Self::Blpop => -2,
         }
     }
 }
 
 /// All command handling lives here. This is the seam that grows into a Command enum.
-pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), CommandError> {
+pub fn dispatch(
+    db: &mut Db,
+    cur_fd: RawFd,
+    args: &[Vec<u8>],
+    out: &mut Vec<u8>,
+) -> Result<(), CommandError> {
     let name = args
         .first()
         .ok_or_else(|| CommandError::Unknown(String::new()))?;
@@ -134,11 +142,21 @@ pub fn dispatch(db: &mut Db, args: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), 
                 }
             }
         }
+        Command::Blpop => {
+            if let Some(value) = cmd_blpop(db, &args[1], cur_fd) {
+                resp::write_out(ResponseKind::STR(&value), out);
+            }
+        }
     }
 
     Ok(())
 }
 
+fn cmd_blpop(db: &mut Db, key: &Vec<u8>, cur_fd: RawFd) -> Option<Vec<u8>> {
+    let key: Key = key.into();
+    let value = db.blpop(key, cur_fd)?; // None → key absent → caller writes $-1
+    Some((&value).into()) // &Value → Vec<u8> via the reverse From impl
+}
 fn cmd_lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Option<Vec<Vec<u8>>> {
     let key: Key = key.into();
 

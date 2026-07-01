@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    os::fd::RawFd,
     time::{Duration, Instant},
 };
 
@@ -40,6 +41,10 @@ pub struct Db {
     keyspace: HashMap<Key, Value>,
     lists: HashMap<Key, VecDeque<Value>>,
     expires: HashMap<Key, Duration>,
+    // TODO: maybe extend VecDequeu<(RawFd, Duration) and than in server we could compare current
+    // time, if timeout, we could send null or whatever response to this client.
+    waiters: HashMap<Key, VecDeque<RawFd>>,
+    outbox: Vec<Key>,
     start_ms: Instant,
     realtime_ms: Duration,
 }
@@ -50,9 +55,31 @@ impl Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
             lists: HashMap::new(),
+            waiters: HashMap::new(),
+            outbox: Vec::new(),
             start_ms,
             realtime_ms,
         }
+    }
+    pub fn handle_waiters(&mut self) -> HashMap<RawFd, Value> {
+        let mut out: HashMap<RawFd, Value> = HashMap::new();
+        for key in &self.outbox {
+            // Defence in Depth
+            if let Some(list) = self.lists.get_mut(key)
+                && !list.is_empty()
+                && let Some(waiters) = self.waiters.get_mut(key)
+                && !waiters.is_empty()
+            {
+                let fd = waiters
+                    .pop_front()
+                    .expect("queue is guaranteed by the is_empty check before");
+                let item = list
+                    .pop_front()
+                    .expect("value is guaranteed by the is_empty check before");
+                out.insert(fd, item);
+            }
+        }
+        out
     }
     pub fn update_time(&mut self, realtime_ms: Duration) {
         self.realtime_ms = realtime_ms;
@@ -67,8 +94,13 @@ impl Db {
         self.expires.remove(key);
     }
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> i64 {
-        let list = self.lists.entry(key).or_default();
+        let list = self.lists.entry(key.clone()).or_default();
         elems.into_iter().for_each(|e| list.push_front(e));
+
+        if self.waiters.contains_key(&key) {
+            self.outbox.push(key);
+        }
+
         list.len() as i64
     }
 
@@ -78,6 +110,18 @@ impl Db {
         list.map_or(0, |list| list.len() as i64)
     }
 
+    pub fn blpop(&mut self, key: Key, cur_fd: RawFd) -> Option<Value> {
+        // TODO: could be refactored
+        if let Some(list) = self.lists.get_mut(&key)
+            && let Some(item) = list.pop_front()
+        {
+            return Some(item);
+        }
+
+        let waiters = self.waiters.entry(key).or_default();
+        waiters.push_back(cur_fd);
+        return None;
+    }
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Vec<Value> {
         let mut out: Vec<Value> = vec![];
         let Some(list) = self.lists.get_mut(key) else {
@@ -94,8 +138,12 @@ impl Db {
     }
 
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
-        let list = self.lists.entry(key).or_default();
+        let list = self.lists.entry(key.clone()).or_default();
         list.extend(elems);
+
+        if self.waiters.contains_key(&key) {
+            self.outbox.push(key);
+        }
         list.len() as i64
     }
 
