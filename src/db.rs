@@ -4,12 +4,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Eq, PartialEq)]
+use tracing::debug;
+
+#[derive(Eq, Debug, PartialEq)]
 pub struct Value {
     value: String,
 }
 
-#[derive(Eq, Hash, PartialEq, Clone)]
+#[derive(Eq, Debug, Hash, PartialEq, Clone)]
 pub struct Key {
     value: String,
 }
@@ -51,6 +53,7 @@ pub struct Db {
 
 impl Db {
     pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
+        debug!("db initialized");
         Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
