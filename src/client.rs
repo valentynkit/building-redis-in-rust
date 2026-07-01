@@ -1,9 +1,11 @@
+use tracing::{debug, error, instrument, warn};
+
 use crate::command;
 use crate::db::Db;
 use crate::resp::{self, ResponseKind};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 
 pub const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
@@ -26,7 +28,9 @@ impl Client {
             outbuf: Vec::new(),
         }
     }
-
+    pub fn get_raw_fd(&self) -> RawFd {
+        self.stream.as_raw_fd()
+    }
     /// Poller reported this fd readable: read, parse, run, reply.
     pub fn on_readable(&mut self, db: &mut Db) -> Disposition {
         let mut stream = &self.stream;
@@ -35,7 +39,7 @@ impl Client {
         match stream.read(&mut buf) {
             // EOF: peer closed cleanly
             Ok(0) => {
-                println!("disconnected (fd{})", stream.as_raw_fd());
+                warn!("client disconnected");
                 Disposition::Drop
             }
             // TODO extract logic
@@ -46,12 +50,12 @@ impl Client {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
             Err(e) => {
-                eprintln!("read (fd {}): {e}", stream.as_raw_fd());
+                warn!(?e, "read failed");
                 Disposition::Drop
             }
         }
     }
-    pub fn write_response(&mut self, out: Vec<u8>) {
+    pub fn write_response(&mut self, out: &Vec<u8>) {
         resp::write_out(ResponseKind::STR(&out), &mut self.outbuf);
     }
 
@@ -61,6 +65,7 @@ impl Client {
             self.inbuf.drain(..consumed);
             let cur_fd = self.stream.as_raw_fd();
             if let Err(err) = command::dispatch(db, cur_fd, &args, &mut self.outbuf) {
+                debug!(?err, "command error");
                 resp::write_out(
                     ResponseKind::ERROR(err.to_string().as_ref()),
                     &mut self.outbuf,
@@ -70,9 +75,10 @@ impl Client {
         self.flush()
     }
 
+    #[instrument(skip(self))]
     fn flush(&mut self) -> Disposition {
         if let Err(e) = self.stream.write_all(&self.outbuf) {
-            eprintln!("flush (fd{}): {e}", self.stream.as_raw_fd());
+            error!(?e, "flush failed");
             return Disposition::Drop;
         }
 

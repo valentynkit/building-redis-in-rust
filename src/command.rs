@@ -8,6 +8,7 @@ use std::{
 };
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
+use tracing::{debug, info, instrument};
 
 #[derive(Debug, Error, Clone)]
 pub enum CommandError {
@@ -19,7 +20,7 @@ pub enum CommandError {
     WrongNumber(String),
 }
 
-#[derive(AsRefStr, EnumString)]
+#[derive(AsRefStr, EnumString, Debug)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
 pub enum Command {
     Ping,
@@ -46,11 +47,12 @@ impl ExpCmd {
         str::from_utf8(value).ok()?.parse().ok()
     }
 }
-
 impl Command {
     fn check_arity(&self, argc: usize) -> Result<(), CommandError> {
         let arity = self.arity();
         if (arity > 0 && argc != arity as usize) || (arity < 0 && argc < (-arity) as usize) {
+            let actual = argc;
+            debug!(actual = argc, expected = arity, "wrong arity");
             return Err(CommandError::WrongArity(
                 self.as_ref().to_owned(),
                 argc.to_string(),
@@ -79,6 +81,7 @@ impl Command {
 }
 
 /// All command handling lives here. This is the seam that grows into a Command enum.
+#[instrument(skip(db))]
 pub fn dispatch(
     db: &mut Db,
     cur_fd: RawFd,
@@ -91,6 +94,7 @@ pub fn dispatch(
     let cmd = Command::from_bytes(&args[0])
         .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(name).into_owned()))?;
     cmd.check_arity(args.len())?;
+    info!(?cmd, "executing command");
 
     match cmd {
         Command::Ping => resp::write_out(ResponseKind::SIMPLE("PONG"), out),
