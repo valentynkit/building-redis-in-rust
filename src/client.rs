@@ -51,12 +51,16 @@ impl Client {
             }
         }
     }
+    pub fn write_response(&mut self, out: Vec<u8>) {
+        resp::write_out(ResponseKind::STR(&out), &mut self.outbuf);
+    }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
     fn consume(&mut self, db: &mut Db) -> Disposition {
         while let Some((args, consumed)) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..consumed);
-            if let Err(err) = command::dispatch(db, &args, &mut self.outbuf) {
+            let cur_fd = self.stream.as_raw_fd();
+            if let Err(err) = command::dispatch(db, cur_fd, &args, &mut self.outbuf) {
                 resp::write_out(
                     ResponseKind::ERROR(err.to_string().as_ref()),
                     &mut self.outbuf,
