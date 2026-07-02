@@ -50,25 +50,25 @@ pub fn parse_direct(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
 const END_OF_LINE: &[u8; 2] = b"\r\n";
 
 pub enum ResponseKind<'a> {
-    NULL_BULK,
-    SIMPLE_OK,
-    SIMPLE(&'a str),
-    ERROR(&'a str),
-    STR(&'a [u8]),
+    NullBulk,
+    SimpleOk,
+    Simple(&'a str),
+    Error(&'a str),
+    Str(&'a [u8]),
     Int(i64),
-    ARRAY(Vec<Vec<u8>>),
+    Array(Vec<Vec<u8>>),
 }
 pub fn write_out(kind: ResponseKind, out: &mut Vec<u8>) {
     // Each writer emits a fully framed RESP reply (type byte + payload + CRLF).
     // write_out adds nothing — a blanket trailing CRLF double-terminates bulk/error.
     match kind {
-        ResponseKind::NULL_BULK => write_null_bulk(out),
-        ResponseKind::SIMPLE_OK => write_simple(out, "OK"),
-        ResponseKind::SIMPLE(str) => write_simple(out, str),
-        ResponseKind::ERROR(str) => write_error(out, str),
-        ResponseKind::STR(data) => write_str(out, data),
+        ResponseKind::NullBulk => write_null_bulk(out),
+        ResponseKind::SimpleOk => write_simple(out, "OK"),
+        ResponseKind::Simple(str) => write_simple(out, str),
+        ResponseKind::Error(str) => write_error(out, str),
+        ResponseKind::Str(data) => write_str(out, data),
         ResponseKind::Int(num) => write_int(out, num),
-        ResponseKind::ARRAY(items) => write_arr(out, items),
+        ResponseKind::Array(items) => write_arr(out, items),
     }
 }
 
@@ -82,6 +82,7 @@ fn write_arr(out: &mut Vec<u8>, items: Vec<Vec<u8>>) {
 }
 
 fn write_int(out: &mut Vec<u8>, num: i64) {
+    let sign = if num < 0 { b'-' } else { b'+' };
     out.push(b':');
     out.extend_from_slice(num.to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);

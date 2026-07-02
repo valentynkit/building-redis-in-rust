@@ -1,10 +1,11 @@
+use core::fmt;
 use std::{
     collections::{HashMap, VecDeque},
     os::fd::RawFd,
     time::{Duration, Instant},
 };
 
-use tracing::debug;
+use tracing::{debug, info};
 
 #[derive(Eq, Debug, PartialEq)]
 pub struct Value {
@@ -16,6 +17,11 @@ pub struct Key {
     value: String,
 }
 
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.value)
+    }
+}
 impl From<&Vec<u8>> for Key {
     fn from(value: &Vec<u8>) -> Self {
         Self {
@@ -24,6 +30,11 @@ impl From<&Vec<u8>> for Key {
     }
 }
 
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.value)
+    }
+}
 impl From<&Vec<u8>> for Value {
     fn from(value: &Vec<u8>) -> Self {
         Self {
@@ -101,6 +112,7 @@ impl Db {
         elems.into_iter().for_each(|e| list.push_front(e));
 
         if self.waiters.contains_key(&key) {
+            info!(%key, "adding outbox");
             self.outbox.push(key);
         }
 
@@ -121,9 +133,10 @@ impl Db {
             return Some(item);
         }
 
+        info!(%key, "adding waiter");
         let waiters = self.waiters.entry(key).or_default();
         waiters.push_back(cur_fd);
-        return None;
+        None
     }
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Vec<Value> {
         let mut out: Vec<Value> = vec![];
