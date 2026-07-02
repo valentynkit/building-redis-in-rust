@@ -71,7 +71,8 @@ impl Server {
             if let Some(client) = self.clients.get_mut(&client_fd) {
                 let client_fd = client.get_raw_fd();
                 info!(?client_fd, ?value, "writing to waiting clients");
-                client.write_response((&value).into());
+                let value_bytes: Vec<u8> = (&value).into();
+                client.write_response(&value_bytes);
             }
         }
         Ok(())

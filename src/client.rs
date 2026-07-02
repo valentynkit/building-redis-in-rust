@@ -1,3 +1,4 @@
+use tracing::field::debug;
 use tracing::{debug, error, instrument, warn};
 
 use crate::command;
@@ -55,8 +56,15 @@ impl Client {
             }
         }
     }
-    pub fn write_response(&mut self, out: &Vec<u8>) {
-        resp::write_out(ResponseKind::STR(&out), &mut self.outbuf);
+    pub fn write_response(&mut self, out: &[u8]) {
+        debug!(
+                client_fd = self.stream.as_raw_fd(),
+                response = %out.escape_ascii(),
+                "writing response to client"
+
+        );
+        resp::write_out(ResponseKind::Str(&out), &mut self.outbuf);
+        self.flush();
     }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
@@ -67,7 +75,7 @@ impl Client {
             if let Err(err) = command::dispatch(db, cur_fd, &args, &mut self.outbuf) {
                 debug!(?err, "command error");
                 resp::write_out(
-                    ResponseKind::ERROR(err.to_string().as_ref()),
+                    ResponseKind::Error(err.to_string().as_ref()),
                     &mut self.outbuf,
                 );
             }
@@ -76,12 +84,12 @@ impl Client {
     }
 
     #[instrument(skip(self))]
-    fn flush(&mut self) -> Disposition {
+    pub fn flush(&mut self) -> Disposition {
         if let Err(e) = self.stream.write_all(&self.outbuf) {
             error!(?e, "flush failed");
             return Disposition::Drop;
         }
-
+        debug!(flushing = %self.outbuf.escape_ascii(),"flushing to client");
         self.outbuf.clear();
         Disposition::Keep
     }

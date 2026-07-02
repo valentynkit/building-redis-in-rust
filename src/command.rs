@@ -51,7 +51,6 @@ impl Command {
     fn check_arity(&self, argc: usize) -> Result<(), CommandError> {
         let arity = self.arity();
         if (arity > 0 && argc != arity as usize) || (arity < 0 && argc < (-arity) as usize) {
-            let actual = argc;
             debug!(actual = argc, expected = arity, "wrong arity");
             return Err(CommandError::WrongArity(
                 self.as_ref().to_owned(),
@@ -81,7 +80,7 @@ impl Command {
 }
 
 /// All command handling lives here. This is the seam that grows into a Command enum.
-#[instrument(skip(db))]
+#[instrument(skip(db, cur_fd))]
 pub fn dispatch(
     db: &mut Db,
     cur_fd: RawFd,
@@ -97,20 +96,20 @@ pub fn dispatch(
     info!(?cmd, "executing command");
 
     match cmd {
-        Command::Ping => resp::write_out(ResponseKind::SIMPLE("PONG"), out),
+        Command::Ping => resp::write_out(ResponseKind::Simple("PONG"), out),
         // TODO after resp update
-        Command::Echo => resp::write_out(ResponseKind::STR(&args[1..].join(&b' ')), out),
+        Command::Echo => resp::write_out(ResponseKind::Str(&args[1..].join(&b' ')), out),
         Command::Set => {
             if args.len() > 3 {
                 cmd_setex(db, &args[1], &args[2], &args[3], &args[4])?;
             } else {
                 cmd_set(db, &args[1], &args[2]);
             }
-            resp::write_out(ResponseKind::SIMPLE_OK, out);
+            resp::write_out(ResponseKind::SimpleOk, out);
         }
         Command::Get => match cmd_get(db, &args[1]) {
-            Some(v) => resp::write_out(ResponseKind::STR(&v), out),
-            None => resp::write_out(ResponseKind::NULL_BULK, out),
+            Some(v) => resp::write_out(ResponseKind::Str(&v), out),
+            None => resp::write_out(ResponseKind::NullBulk, out),
         },
         Command::Rpush => {
             let len = cmd_rpush(db, &args[1], &args[2..args.len()]);
@@ -122,7 +121,7 @@ pub fn dispatch(
         }
         Command::Lrange => {
             let values = cmd_lrange(db, &args[1], &args[2], &args[3])?;
-            resp::write_out(ResponseKind::ARRAY(values), out);
+            resp::write_out(ResponseKind::Array(values), out);
         }
         Command::Llen => {
             let len = cmd_llen(db, &args[1]);
@@ -131,24 +130,24 @@ pub fn dispatch(
         Command::Lpop => {
             let values = cmd_lpop(db, &args[1], args.get(2));
             let Some(values) = values else {
-                resp::write_out(ResponseKind::NULL_BULK, out);
+                resp::write_out(ResponseKind::NullBulk, out);
                 return Ok(());
             };
             match values {
                 _ if values.is_empty() => {
-                    resp::write_out(ResponseKind::NULL_BULK, out);
+                    resp::write_out(ResponseKind::NullBulk, out);
                 }
                 _ if values.len() == 1 => {
-                    resp::write_out(ResponseKind::STR(&values[0]), out);
+                    resp::write_out(ResponseKind::Str(&values[0]), out);
                 }
                 _ => {
-                    resp::write_out(ResponseKind::ARRAY(values), out);
+                    resp::write_out(ResponseKind::Array(values), out);
                 }
             }
         }
         Command::Blpop => {
             if let Some(value) = cmd_blpop(db, &args[1], cur_fd) {
-                resp::write_out(ResponseKind::STR(&value), out);
+                resp::write_out(ResponseKind::Str(&value), out);
             }
         }
     }
