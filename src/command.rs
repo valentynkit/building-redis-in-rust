@@ -147,7 +147,8 @@ pub fn dispatch(
         }
         Command::Blpop => {
             if let Some(value) = cmd_blpop(db, &args[1], cur_fd) {
-                resp::write_out(ResponseKind::Str(&value), out);
+                let val_wrapper: Vec<Vec<u8>> = vec![value];
+                resp::write_out(ResponseKind::Array(val_wrapper), out);
             }
         }
     }
