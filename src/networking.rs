@@ -67,11 +67,10 @@ impl Server {
         self.set_current_time()?;
         self.cronloops += 1;
         let waiters = self.db.handle_waiters();
-        for (client_fd, value) in waiters {
+        for (client_fd, (key, value)) in waiters {
             if let Some(client) = self.clients.get_mut(&client_fd) {
                 let client_fd = client.get_raw_fd();
-                info!(?client_fd, ?value, "writing to waiting clients");
-                let value_bytes: Vec<u8> = (&value).into();
+                info!(?client_fd, ?key, ?value, "writing to waiting clients");
                 client.write_response(&value_bytes);
             }
         }
