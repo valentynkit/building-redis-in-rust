@@ -49,61 +49,87 @@ pub fn parse_direct(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
 
 const END_OF_LINE: &[u8; 2] = b"\r\n";
 
-pub enum ResponseKind<'a> {
-    NullBulk,
-    SimpleOk,
-    Simple(&'a str),
-    Error(&'a str),
-    Str(&'a [u8]),
-    Int(i64),
-    Array(Vec<Vec<u8>>),
+pub enum Resp {
+    Simple(String),
+    Error(String),
+    Integer(i64),
+    // TODO: consider migrating to Bytes/BytesMut instead of u8
+    Bulk(Option<Vec<u8>>),
+    Array(Option<Vec<Resp>>),
 }
-pub fn write_out(kind: ResponseKind, out: &mut Vec<u8>) {
-    // Each writer emits a fully framed RESP reply (type byte + payload + CRLF).
-    // write_out adds nothing — a blanket trailing CRLF double-terminates bulk/error.
-    match kind {
-        ResponseKind::NullBulk => write_null_bulk(out),
-        ResponseKind::SimpleOk => write_simple(out, "OK"),
-        ResponseKind::Simple(str) => write_simple(out, str),
-        ResponseKind::Error(str) => write_error(out, str),
-        ResponseKind::Str(data) => write_str(out, data),
-        ResponseKind::Int(num) => write_int(out, num),
-        ResponseKind::Array(items) => write_arr(out, items),
+
+pub enum Reply {
+    Now(Resp),
+    Blocked,
+}
+
+impl Resp {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Simple(s) => write_simple_string(out, s),
+            Self::Error(s) => write_simple_error(out, s),
+            Self::Integer(num) => write_int(out, *num),
+            Self::Bulk(None) => write_null_bulk(out),
+            Self::Bulk(Some(bulk_str)) => write_bulk_string(out, bulk_str),
+            Self::Array(None) => write_null_array(out),
+            Self::Array(Some(value)) => write_arr(out, value),
+        }
+    }
+
+    // A client request is always Array(Some([Bulk, Bulk, ...])) flatten to raw args.
+    pub fn into_args(self) -> Option<Vec<Vec<u8>>> {
+        let Resp::Array(Some(items)) = self else {
+            return None;
+        };
+        items
+            .into_iter()
+            .map(|item| match item {
+                Resp::Bulk(Some(bytes)) => Some(bytes),
+                _ => None,
+            })
+            .collect()
     }
 }
 
-fn write_arr(out: &mut Vec<u8>, items: Vec<Vec<u8>>) {
+// TODO: MAKE it recursive
+// *{v.len()}\r\n then recurse e.encode(out) per element
+fn write_arr(out: &mut Vec<u8>, items: &[Resp]) {
     out.push(b'*');
     out.extend_from_slice(items.len().to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);
+
     for item in items {
-        write_str(out, &item);
+        item.encode(out);
     }
 }
 
 fn write_int(out: &mut Vec<u8>, num: i64) {
-    let sign = if num < 0 { b'-' } else { b'+' };
     out.push(b':');
     out.extend_from_slice(num.to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);
 }
+
 fn write_null_bulk(out: &mut Vec<u8>) {
     out.extend_from_slice(b"$-1\r\n");
 }
 
-fn write_error(out: &mut Vec<u8>, msg: &str) {
+fn write_null_array(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"*-1\r\n");
+}
+
+fn write_simple_error(out: &mut Vec<u8>, msg: &str) {
     out.extend_from_slice(b"-ERR ");
     out.extend_from_slice(msg.as_bytes());
     out.extend_from_slice(END_OF_LINE);
 }
 
-fn write_simple(out: &mut Vec<u8>, s: &str) {
+fn write_simple_string(out: &mut Vec<u8>, s: &str) {
     out.push(b'+');
     out.extend_from_slice(s.as_bytes());
     out.extend_from_slice(END_OF_LINE);
 }
 
-fn write_str(out: &mut Vec<u8>, data: &[u8]) {
+fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
     out.push(b'$');
     out.extend_from_slice(data.len().to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);
@@ -113,7 +139,7 @@ fn write_str(out: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod test {
-    use crate::resp::{parse_direct, parse_resp};
+    use crate::resp::{Resp, parse_direct, parse_resp};
 
     #[test]
     fn resp_full_line() {
@@ -141,6 +167,17 @@ mod test {
         assert!(parse_direct(b"PING \r").is_none());
         assert!(parse_direct(b"PING\r").is_none());
         assert!(parse_direct(b"\n").is_none());
+    }
+
+    #[test]
+    fn encodes_blpop_reply() {
+        let mut out = Vec::new();
+        Resp::Array(Some(vec![
+            Resp::Bulk(Some(b"apple".to_vec())),
+            Resp::Bulk(Some(b"blueberry".to_vec())),
+        ]))
+        .encode(&mut out);
+        assert_eq!(out, b"*2\r\n$5\r\napple\r\n$9\r\nblueberry\r\n");
     }
 
     #[test]

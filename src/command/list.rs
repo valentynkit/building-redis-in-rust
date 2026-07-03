@@ -1,0 +1,111 @@
+use std::os::fd::RawFd;
+
+use crate::{
+    command::CommandError,
+    db::{Db, Key, Value},
+    resp::{Reply, Resp},
+};
+
+pub enum Side {
+    Front,
+    Back,
+}
+
+pub fn push(
+    db: &mut Db,
+    side: Side,
+    key: &Vec<u8>,
+    elems: &[Vec<u8>],
+) -> Result<Reply, CommandError> {
+    let key: Key = key.into();
+    let elems: Vec<Value> = elems.iter().map(Into::into).collect();
+    let out: i64 = match side {
+        Side::Front => db.list_prepand(key, elems),
+        Side::Back => db.list_append(key, elems),
+    };
+
+    Ok(Reply::Now(Resp::Integer(out)))
+}
+
+pub fn lrange(
+    db: &Db,
+    key: &Vec<u8>,
+    num_from: &Vec<u8>,
+    num_to: &Vec<u8>,
+) -> Result<Reply, CommandError> {
+    let key: Key = key.into();
+    let num_from_err = CommandError::WrongNumber(String::from_utf8_lossy(num_from).into());
+    let num_to_err = CommandError::WrongNumber(String::from_utf8_lossy(num_to).into());
+
+    let num_from: i32 = str::from_utf8(num_from)
+        .ok()
+        .and_then(|item| item.parse().ok())
+        .ok_or_else(|| num_from_err)?;
+
+    let num_to: i32 = str::from_utf8(num_to)
+        .ok()
+        .and_then(|item| item.parse().ok())
+        .ok_or_else(|| num_to_err)?;
+
+    let items: Vec<Vec<u8>> = db
+        .list_get(key, num_from, num_to)
+        .iter()
+        .map(|&item| item.into())
+        .collect();
+
+    let resp_arr = items
+        .into_iter()
+        .map(|item| Resp::Bulk(Some(item)))
+        .collect::<Vec<Resp>>();
+
+    Ok(Reply::Now(Resp::Array(Some(resp_arr))))
+}
+
+pub fn llen(db: &Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
+    let key: Key = key.into();
+    let out = db.list_len(key);
+    Ok(Reply::Now(Resp::Integer(out)))
+}
+
+pub fn blpop(db: &mut Db, key: &Vec<u8>, cur_fd: RawFd) -> Result<Reply, CommandError> {
+    let key: Key = key.into();
+    let resp = db.blpop(key.clone(), cur_fd).map(|item| {
+        Resp::Array(Some(vec![
+            Resp::Bulk(Some(item.into())),
+            Resp::Bulk(Some(key.into())),
+        ]))
+    }); // None → key absent → caller writes $-1
+
+    match resp {
+        Some(resp) => Ok(Reply::Now(resp)),
+        None => Ok(Reply::Blocked),
+    }
+}
+
+pub fn lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Result<Reply, CommandError> {
+    let key: Key = key.into();
+
+    let num_parsed: usize = if let Some(num) = num {
+        str::from_utf8(num)
+            .ok()
+            .and_then(|item| item.parse().ok())
+            .ok_or_else(|| CommandError::WrongNumber(String::from_utf8_lossy(num).into()))?
+    } else {
+        1
+    };
+
+    let items: Vec<Vec<u8>> = db
+        .list_pop(&key, num_parsed)
+        .iter()
+        .map(Into::into)
+        .collect();
+
+    let resp_arr = items
+        .into_iter()
+        .map(|item| Resp::Bulk(Some(item)))
+        .collect::<Vec<Resp>>();
+
+    // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
+    // directly without packing it into Array?
+    Ok(Reply::Now(Resp::Array(Some(resp_arr))))
+}

@@ -1,5 +1,6 @@
 use core::fmt;
 use std::{
+    borrow::Borrow,
     collections::{HashMap, VecDeque},
     os::fd::RawFd,
     time::{Duration, Instant},
@@ -7,46 +8,75 @@ use std::{
 
 use tracing::{debug, info};
 
-#[derive(Eq, Debug, PartialEq)]
+#[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
-    value: String,
+    value: Vec<u8>,
 }
 
-#[derive(Eq, Debug, Hash, PartialEq, Clone)]
+#[derive(Eq, Default, Debug, Hash, PartialEq, Clone)]
 pub struct Key {
-    value: String,
+    value: Vec<u8>,
+}
+
+impl From<Vec<u8>> for Key {
+    fn from(value: Vec<u8>) -> Self {
+        Self { value }
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Self { value }
+    }
+}
+
+impl From<&Vec<u8>> for Key {
+    fn from(value: &Vec<u8>) -> Self {
+        Self {
+            value: value.clone(),
+        }
+    }
+}
+
+impl From<&Vec<u8>> for Value {
+    fn from(value: &Vec<u8>) -> Self {
+        Self {
+            value: value.clone(),
+        }
+    }
+}
+impl From<Key> for Vec<u8> {
+    fn from(value: Key) -> Vec<u8> {
+        value.value
+    }
+}
+
+impl From<Value> for Vec<u8> {
+    fn from(value: Value) -> Vec<u8> {
+        value.value
+    }
+}
+
+impl From<&Value> for Vec<u8> {
+    fn from(value: &Value) -> Vec<u8> {
+        value.value.clone()
+    }
+}
+impl Borrow<[u8]> for Key {
+    fn borrow(&self) -> &[u8] {
+        &self.value
+    }
 }
 
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.value)
-    }
-}
-impl From<&Vec<u8>> for Key {
-    fn from(value: &Vec<u8>) -> Self {
-        Self {
-            value: String::from_utf8_lossy(value).into_owned(),
-        }
+        f.write_str(&String::from_utf8_lossy(&self.value))
     }
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.value)
-    }
-}
-impl From<&Vec<u8>> for Value {
-    fn from(value: &Vec<u8>) -> Self {
-        Self {
-            value: String::from_utf8_lossy(value).into_owned(),
-        }
-    }
-}
-
-// The reverse direction — separate impl, From doesn't generate it for you.
-impl From<&Value> for Vec<u8> {
-    fn from(value: &Value) -> Self {
-        value.value.as_bytes().to_vec()
+        f.write_str(&String::from_utf8_lossy(&self.value))
     }
 }
 
@@ -75,8 +105,10 @@ impl Db {
             realtime_ms,
         }
     }
-    pub fn handle_waiters(&mut self) -> HashMap<RawFd, Value> {
-        let mut out: HashMap<RawFd, Value> = HashMap::new();
+
+    // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
+    pub fn handle_waiters(&mut self) -> HashMap<RawFd, (Key, Value)> {
+        let mut out: HashMap<RawFd, (Key, Value)> = HashMap::new();
         for key in &self.outbox {
             // Defence in Depth
             if let Some(list) = self.lists.get_mut(key)
@@ -90,7 +122,7 @@ impl Db {
                 let item = list
                     .pop_front()
                     .expect("value is guaranteed by the is_empty check before");
-                out.insert(fd, item);
+                out.insert(fd, (key.clone(), item));
             }
         }
         out
@@ -138,6 +170,17 @@ impl Db {
         waiters.push_back(cur_fd);
         None
     }
+
+    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
+        let list = self.lists.entry(key.clone()).or_default();
+        list.extend(elems);
+
+        if self.waiters.contains_key(&key) {
+            self.outbox.push(key);
+        }
+        list.len() as i64
+    }
+
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Vec<Value> {
         let mut out: Vec<Value> = vec![];
         let Some(list) = self.lists.get_mut(key) else {
@@ -151,16 +194,6 @@ impl Db {
             }
         }
         out
-    }
-
-    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
-        let list = self.lists.entry(key.clone()).or_default();
-        list.extend(elems);
-
-        if self.waiters.contains_key(&key) {
-            self.outbox.push(key);
-        }
-        list.len() as i64
     }
 
     // TODO: potential improvements:

@@ -3,7 +3,7 @@ use tracing::{debug, error, instrument, warn};
 
 use crate::command;
 use crate::db::Db;
-use crate::resp::{self, ResponseKind};
+use crate::resp::{self, Resp};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
@@ -56,14 +56,13 @@ impl Client {
             }
         }
     }
-    pub fn write_response(&mut self, out: &[u8]) {
+    pub fn write_response(&mut self, out: Vec<Vec<u8>>) {
+        // TODO: how to log this out in debug?
         debug!(
-                client_fd = self.stream.as_raw_fd(),
-                response = %out.escape_ascii(),
-                "writing response to client"
-
+            client_fd = self.stream.as_raw_fd(),
+            "writing response to client"
         );
-        resp::write_out(ResponseKind::Str(&out), &mut self.outbuf);
+        resp::write_out(ResponseKind::Array(out), &mut self.outbuf);
         self.flush();
     }
 
@@ -75,7 +74,7 @@ impl Client {
             if let Err(err) = command::dispatch(db, cur_fd, &args, &mut self.outbuf) {
                 debug!(?err, "command error");
                 resp::write_out(
-                    ResponseKind::Error(err.to_string().as_ref()),
+                    ResponseKind::SimpleError(err.to_string().as_ref()),
                     &mut self.outbuf,
                 );
             }
