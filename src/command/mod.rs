@@ -112,5 +112,5 @@ fn cmd_ping() -> Reply {
 }
 
 fn cmd_echo(arg: &[u8]) -> Reply {
-    Reply::Now(Resp::Simple(String::from_utf8_lossy(arg).into_owned()))
+    Reply::Now(Resp::Bulk(Some(arg.into())))
 }
