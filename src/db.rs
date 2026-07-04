@@ -181,7 +181,8 @@ impl Db {
 
         info!(%key, "adding waiter");
         let waiters = self.waiters.entry(key).or_default();
-        waiters.push_back((cur_fd, timeout));
+        let deadline = timeout.map(|t| self.realtime_ms + t);
+        waiters.push_back((cur_fd, deadline));
         None
     }
 
