@@ -1,4 +1,4 @@
-use core::fmt;
+use core::{fmt, time};
 use std::{
     borrow::Borrow,
     collections::{HashMap, VecDeque},
@@ -86,7 +86,7 @@ pub struct Db {
     expires: HashMap<Key, Duration>,
     // TODO: maybe extend VecDequeu<(RawFd, Duration) and than in server we could compare current
     // time, if timeout, we could send null or whatever response to this client.
-    waiters: HashMap<Key, VecDeque<RawFd>>,
+    waiters: HashMap<Key, VecDeque<(RawFd, Option<Duration>)>>,
     outbox: Vec<Key>,
     start_ms: Instant,
     realtime_ms: Duration,
@@ -109,6 +109,15 @@ impl Db {
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
     pub fn handle_waiters(&mut self) -> HashMap<RawFd, (Key, Value)> {
         let mut out: HashMap<RawFd, (Key, Value)> = HashMap::new();
+        // cleanup timeout waiters
+        self.waiters.retain(|_key, waiters| {
+            waiters.retain(|(_fd, timeout)| {
+                let is_expired = timeout.is_some_and(|timeout| timeout <= self.realtime_ms);
+                is_expired
+            });
+            !waiters.is_empty()
+        });
+
         for key in &self.outbox {
             // Defence in Depth
             if let Some(list) = self.lists.get_mut(key)
@@ -116,7 +125,7 @@ impl Db {
                 && let Some(waiters) = self.waiters.get_mut(key)
                 && !waiters.is_empty()
             {
-                let fd = waiters
+                let (fd, _timeout) = waiters
                     .pop_front()
                     .expect("queue is guaranteed by the is_empty check before");
                 let item = list
@@ -157,7 +166,7 @@ impl Db {
         list.map_or(0, |list| list.len() as i64)
     }
 
-    pub fn blpop(&mut self, key: Key, cur_fd: RawFd) -> Option<Value> {
+    pub fn blpop(&mut self, key: Key, timeout: Option<Duration>, cur_fd: RawFd) -> Option<Value> {
         // TODO: could be refactored
         if let Some(list) = self.lists.get_mut(&key)
             && let Some(item) = list.pop_front()
@@ -167,7 +176,7 @@ impl Db {
 
         info!(%key, "adding waiter");
         let waiters = self.waiters.entry(key).or_default();
-        waiters.push_back(cur_fd);
+        waiters.push_back((cur_fd, timeout));
         None
     }
 

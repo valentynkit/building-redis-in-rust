@@ -1,6 +1,6 @@
 use tracing::{debug, error, instrument, warn};
 
-use crate::command::{self, CommandError};
+use crate::command::{self};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
 use std::io::{self, Read, Write};
@@ -78,7 +78,7 @@ impl Client {
                 },
                 Err(err) => {
                     debug!(?err, "command error");
-                    out.push(Resp::new_error(err));
+                    out.push(Resp::new_error(&err));
                 }
             }
         }
