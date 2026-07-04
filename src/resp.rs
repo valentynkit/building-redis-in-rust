@@ -1,9 +1,12 @@
 // find star,
 
-pub fn parse_resp(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
-    if *buf.first()? != b'*' {
+use crate::command::CommandError;
+
+pub fn parse_request(buf: &[u8]) -> Option<Request> {
+    if buf.first()? != &b'*' {
         return None;
     }
+
     let get_position = |inner_buf: &[u8], ch: u8| inner_buf.iter().position(|&b| b == ch);
     let get_part_end_position = |inner_buf: &[u8]| get_position(inner_buf, b'\r');
     let get_dollar_sign_position = |inner_buf: &[u8]| get_position(inner_buf, b'$');
@@ -29,7 +32,7 @@ pub fn parse_resp(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
         output.push(part_slice.to_vec());
     }
 
-    Some((output, cursor))
+    Some(Request::new(output, cursor))
 }
 
 pub fn parse_direct(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
@@ -63,7 +66,37 @@ pub enum Reply {
     Blocked,
 }
 
+pub struct Request {
+    body: Resp,
+    consumed: usize,
+}
+
+impl Request {
+    fn new(items: Vec<Vec<u8>>, consumed: usize) -> Self {
+        let resp_arr = items
+            .into_iter()
+            .map(|item| Resp::Bulk(Some(item)))
+            .collect::<Vec<Resp>>();
+
+        Request {
+            body: Resp::Array(Some(resp_arr)),
+            consumed,
+        }
+    }
+    pub fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    pub fn body(self) -> Resp {
+        self.body
+    }
+}
+
 impl Resp {
+    pub fn new_error(error: CommandError) -> Self {
+        Resp::Error(error.to_string())
+    }
+
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Simple(s) => write_simple_string(out, s),
@@ -139,11 +172,11 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod test {
-    use crate::resp::{Resp, parse_direct, parse_resp};
+    use crate::resp::{Resp, parse_direct, parse_request};
 
     #[test]
     fn resp_full_line() {
-        let (args, n) = parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
+        let (args, n) = parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
         assert_eq!(args, vec![b"ECHO".to_vec(), b"hey".to_vec()]);
         assert_eq!(n, 23);
     }
