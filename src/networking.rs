@@ -11,6 +11,7 @@ use tracing::{debug, debug_span, error, info, instrument, warn};
 use crate::client::{Client, Disposition};
 use crate::db::Db;
 use crate::poll::Poller;
+use crate::resp::Resp;
 const ADDR: &str = "127.0.0.1:6379";
 pub struct StartTime {
     start_ms_mono: Instant,
@@ -71,7 +72,17 @@ impl Server {
             if let Some(client) = self.clients.get_mut(&client_fd) {
                 let client_fd = client.get_raw_fd();
                 info!(?client_fd, ?key, ?value, "writing to waiting clients");
-                client.write_response(&value_bytes);
+                // TODO: order should be 1) key, 2) value
+                let resp = Resp::Array(Some(vec![
+                    Resp::Bulk(Some(key.into())),
+                    Resp::Bulk(Some(value.into())),
+                ]));
+                client.write_out(&resp);
+
+                if matches!(client.flush(), Disposition::Drop) {
+                    warn!("removing client");
+                    self.clients.remove(&client_fd);
+                }
             }
         }
         Ok(())

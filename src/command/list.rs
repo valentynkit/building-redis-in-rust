@@ -67,12 +67,14 @@ pub fn llen(db: &Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
     Ok(Reply::Now(Resp::Integer(out)))
 }
 
+// TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
+// directly without packing it into Array?
 pub fn blpop(db: &mut Db, key: &Vec<u8>, cur_fd: RawFd) -> Result<Reply, CommandError> {
     let key: Key = key.into();
     let resp = db.blpop(key.clone(), cur_fd).map(|item| {
         Resp::Array(Some(vec![
-            Resp::Bulk(Some(item.into())),
             Resp::Bulk(Some(key.into())),
+            Resp::Bulk(Some(item.into())),
         ]))
     }); // None → key absent → caller writes $-1
 

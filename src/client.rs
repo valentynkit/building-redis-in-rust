@@ -1,9 +1,8 @@
-use tracing::field::debug;
 use tracing::{debug, error, instrument, warn};
 
-use crate::command;
+use crate::command::{self, CommandError};
 use crate::db::Db;
-use crate::resp::{self, Resp};
+use crate::resp::{self, Reply, Resp};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
@@ -46,7 +45,11 @@ impl Client {
             // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
-                self.consume(db)
+                for resp in self.consume(db) {
+                    self.write_out(&resp);
+                }
+
+                self.flush()
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
@@ -56,30 +59,30 @@ impl Client {
             }
         }
     }
-    pub fn write_response(&mut self, out: Vec<Vec<u8>>) {
-        // TODO: how to log this out in debug?
-        debug!(
-            client_fd = self.stream.as_raw_fd(),
-            "writing response to client"
-        );
-        resp::write_out(ResponseKind::Array(out), &mut self.outbuf);
-        self.flush();
+
+    pub fn write_out(&mut self, resp: &Resp) {
+        resp.encode(&mut self.outbuf);
     }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
-    fn consume(&mut self, db: &mut Db) -> Disposition {
-        while let Some((args, consumed)) = resp::parse_resp(&self.inbuf) {
-            self.inbuf.drain(..consumed);
+    fn consume(&mut self, db: &mut Db) -> Vec<Resp> {
+        let mut out: Vec<Resp> = vec![];
+        while let Some(request) = resp::parse_request(&self.inbuf) {
+            self.inbuf.drain(..request.consumed());
             let cur_fd = self.stream.as_raw_fd();
-            if let Err(err) = command::dispatch(db, cur_fd, &args, &mut self.outbuf) {
-                debug!(?err, "command error");
-                resp::write_out(
-                    ResponseKind::SimpleError(err.to_string().as_ref()),
-                    &mut self.outbuf,
-                );
+            let response = command::handle(request.body(), db, cur_fd);
+            match response {
+                Ok(reply) => match reply {
+                    Reply::Now(resp) => out.push(resp),
+                    Reply::Blocked => {}
+                },
+                Err(err) => {
+                    debug!(?err, "command error");
+                    out.push(Resp::new_error(err));
+                }
             }
         }
-        self.flush()
+        out
     }
 
     #[instrument(skip(self))]
