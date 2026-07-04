@@ -65,7 +65,6 @@ impl Server {
     }
     // HouseKeeping
     fn before_sleep(&mut self) -> Result<()> {
-        self.set_current_time()?;
         self.cronloops += 1;
         let waiters = self.db.handle_waiters();
         for (client_fd, (key, value)) in waiters {
@@ -98,6 +97,7 @@ impl Server {
 
             self.before_sleep()?;
             let events = self.poller.wait()?;
+            self.set_current_time()?;
             for event in events {
                 if event.readable {
                     if event.fd == lfd {
