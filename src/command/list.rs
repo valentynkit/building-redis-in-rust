@@ -96,18 +96,22 @@ pub fn lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Result<Reply, 
         1
     };
 
-    let items: Vec<Vec<u8>> = db
+    let mut items: Vec<Vec<u8>> = db
         .list_pop(&key, num_parsed)
         .iter()
         .map(Into::into)
         .collect();
 
-    let resp_arr = items
-        .into_iter()
-        .map(|item| Resp::Bulk(Some(item)))
-        .collect::<Vec<Resp>>();
+    let resp = if items.len() == 1 {
+        Resp::Bulk(items.pop())
+    } else {
+        Resp::Array(Some(
+            items
+                .into_iter()
+                .map(|item| Resp::Bulk(Some(item)))
+                .collect::<Vec<Resp>>(),
+        ))
+    };
 
-    // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
-    // directly without packing it into Array?
-    Ok(Reply::Now(Resp::Array(Some(resp_arr))))
+    Ok(Reply::Now(resp))
 }
