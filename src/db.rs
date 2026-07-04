@@ -2,6 +2,7 @@ use core::{fmt, time};
 use std::{
     borrow::Borrow,
     collections::{HashMap, VecDeque},
+    mem,
     os::fd::RawFd,
     time::{Duration, Instant},
 };
@@ -107,20 +108,24 @@ impl Db {
     }
 
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
-    pub fn handle_waiters(&mut self) -> HashMap<RawFd, (Key, Value)> {
-        let mut out: HashMap<RawFd, (Key, Value)> = HashMap::new();
+    pub fn handle_waiters(&mut self) -> HashMap<RawFd, Option<(Key, Value)>> {
+        let mut out: HashMap<RawFd, Option<(Key, Value)>> = HashMap::new();
         // cleanup timeout waiters
         self.waiters.retain(|_key, waiters| {
-            waiters.retain(|(_fd, timeout)| {
+            waiters.retain(|(fd, timeout)| {
                 let is_expired = timeout.is_some_and(|timeout| timeout <= self.realtime_ms);
-                is_expired
+                if is_expired {
+                    out.insert(*fd, None);
+                }
+                !is_expired
             });
             !waiters.is_empty()
         });
 
-        for key in &self.outbox {
+        let outbox = mem::take(&mut self.outbox);
+        for key in &outbox {
             // Defence in Depth
-            if let Some(list) = self.lists.get_mut(key)
+            while let Some(list) = self.lists.get_mut(key)
                 && !list.is_empty()
                 && let Some(waiters) = self.waiters.get_mut(key)
                 && !waiters.is_empty()
@@ -131,7 +136,7 @@ impl Db {
                 let item = list
                     .pop_front()
                     .expect("value is guaranteed by the is_empty check before");
-                out.insert(fd, (key.clone(), item));
+                out.insert(fd, Some((key.clone(), item)));
             }
         }
         out
