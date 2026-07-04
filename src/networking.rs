@@ -63,19 +63,30 @@ impl Server {
         self.db.update_time(realtime_ms);
         Ok(())
     }
+
     // HouseKeeping
-    fn before_sleep(&mut self) -> Result<()> {
+    fn before_sleep(&mut self) {
         self.cronloops += 1;
+        // HM<i32, Option<(Key, Value)>> getting None for some fd, means that it timeout, and have
+        // to receive response
         let waiters = self.db.handle_waiters();
-        for (client_fd, (key, value)) in waiters {
+        for (client_fd, kv) in waiters {
             if let Some(client) = self.clients.get_mut(&client_fd) {
                 let client_fd = client.get_raw_fd();
-                info!(?client_fd, ?key, ?value, "writing to waiting clients");
-                // TODO: order should be 1) key, 2) value
-                let resp = Resp::Array(Some(vec![
-                    Resp::Bulk(Some(key.into())),
-                    Resp::Bulk(Some(value.into())),
-                ]));
+                let resp = match kv {
+                    Some((key, value)) => {
+                        info!(?client_fd, ?key, ?value, "writing to waiting clients");
+                        Resp::Array(Some(vec![
+                            Resp::Bulk(Some(key.into())),
+                            Resp::Bulk(Some(value.into())),
+                        ]))
+                    }
+                    None => {
+                        // TODO: Array none? or Bulk none
+                        Resp::Array(None)
+                    }
+                };
+
                 client.write_out(&resp);
 
                 if matches!(client.flush(), Disposition::Drop) {
@@ -84,7 +95,6 @@ impl Server {
                 }
             }
         }
-        Ok(())
     }
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
