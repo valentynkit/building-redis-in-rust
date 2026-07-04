@@ -105,7 +105,7 @@ impl Server {
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
-            self.before_sleep()?;
+            self.before_sleep();
             let events = self.poller.wait()?;
             self.set_current_time()?;
             for event in events {
