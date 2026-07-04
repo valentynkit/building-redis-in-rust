@@ -21,10 +21,8 @@ pub fn set(
 ) -> Result<Reply, CommandError> {
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
-    let out = db
-        .setex(key.into(), value.into(), expiry)
-        .map(|value| value.into());
-    Ok(Reply::Now(Resp::Bulk(out)))
+    db.setex(key.into(), value.into(), expiry);
+    Ok(Reply::Now(Resp::Simple("OK".into())))
 }
 
 fn parse_ttl(
@@ -43,7 +41,7 @@ fn parse_ttl(
     let n: u64 = str::from_utf8(exp)
         .ok()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| number_err)?;
+        .ok_or(number_err)?;
 
     // exp_cmd could be EX or PX. EX = seconds, PX = milisseconds.
     let ms = match cmd {
