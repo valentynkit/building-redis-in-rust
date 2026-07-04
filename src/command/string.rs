@@ -6,10 +6,10 @@ use crate::{
     resp::{Reply, Resp},
 };
 
-pub fn get(db: &mut Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
+pub fn get(db: &mut Db, key: &Vec<u8>) -> Reply {
     let key: Key = key.into();
     let opt_value = db.get(&key).map(Into::into); // None → key absent → caller writes $-1
-    Ok(Reply::Now(Resp::Bulk(opt_value)))
+    Reply::Now(Resp::Bulk(opt_value))
 }
 
 pub fn set(

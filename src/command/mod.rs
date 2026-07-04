@@ -48,7 +48,7 @@ impl ExpCmd {
     }
 }
 impl Command {
-    fn arity(&self) -> i32 {
+    const fn arity(self) -> i32 {
         match self {
             Self::Ping => 1,
             Self::Echo => -1,
@@ -77,7 +77,7 @@ impl Command {
     fn from_bytes(value: &[u8]) -> Result<Self, CommandError> {
         str::from_utf8(value)
             .ok()
-            .and_then(|s| s.parse::<Command>().ok())
+            .and_then(|s| s.parse::<Self>().ok())
             .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(value).into_owned()))
     }
 }
@@ -94,24 +94,23 @@ pub fn handle(frame: Resp, db: &mut Db, client_fd: RawFd) -> Result<Reply, Comma
     Span::current().record("cmd", field::display(&kind));
     info!(command = ?kind, "handling cmd");
     match kind {
-        Command::Ping => cmd_ping(),
-        Command::Echo => cmd_echo(&args[1]),
-        Command::Get => string::get(db, &args[1]),
+        Command::Ping => Ok(cmd_ping()),
+        Command::Echo => Ok(cmd_echo(&args[1])),
+        Command::Get => Ok(string::get(db, &args[1])),
         Command::Set => string::set(db, &args[1], &args[2], args.get(3), args.get(4)),
         Command::Lpush => list::push(db, Side::Front, &args[1], &args[2..args.len()]),
         Command::Rpush => list::push(db, Side::Back, &args[1], &args[2..args.len()]),
         Command::Llen => list::llen(db, &args[1]),
         Command::Lpop => list::lpop(db, &args[1], args.get(2)),
+        Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
         Command::Blpop => list::blpop(db, &args[1], client_fd),
-        _ => todo!(),
     }
 }
 
-fn cmd_ping() -> Result<Reply, CommandError> {
-    Ok(Reply::Now(Resp::Simple("PONG".to_owned())))
+fn cmd_ping() -> Reply {
+    Reply::Now(Resp::Simple("PONG".to_owned()))
 }
-fn cmd_echo(arg: &[u8]) -> Result<Reply, CommandError> {
-    Ok(Reply::Now(Resp::Simple(
-        String::from_utf8_lossy(arg).into_owned(),
-    )))
+
+fn cmd_echo(arg: &[u8]) -> Reply {
+    Reply::Now(Resp::Simple(String::from_utf8_lossy(arg).into_owned()))
 }
