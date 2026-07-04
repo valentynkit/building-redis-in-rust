@@ -1,6 +1,6 @@
 // find star,
 
-use crate::command::CommandError;
+use crate::command::common::CommandError;
 
 pub fn parse_request(buf: &[u8]) -> Option<Request> {
     if buf.first()? != &b'*' {
@@ -35,21 +35,6 @@ pub fn parse_request(buf: &[u8]) -> Option<Request> {
     Some(Request::new(output, cursor))
 }
 
-pub fn parse_direct(buf: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
-    let nl = buf.iter().position(|&b| b == b'\n')?;
-    let mut line = &buf[..nl];
-    if line.is_empty() {
-        return None;
-    }
-    if line.last() == Some(&b'\r') {
-        line = &line[..line.len() - 1];
-    }
-
-    let args = line.split(|&b| b == b' ').map(<[u8]>::to_vec).collect();
-
-    Some((args, nl + 1)) //  to also consume the \n
-}
-
 const END_OF_LINE: &[u8; 2] = b"\r\n";
 
 pub enum Resp {
@@ -58,7 +43,7 @@ pub enum Resp {
     Integer(i64),
     // TODO: consider migrating to Bytes/BytesMut instead of u8
     Bulk(Option<Vec<u8>>),
-    Array(Option<Vec<Resp>>),
+    Array(Option<Vec<Self>>),
 }
 
 pub enum Reply {
@@ -78,12 +63,12 @@ impl Request {
             .map(|item| Resp::Bulk(Some(item)))
             .collect::<Vec<Resp>>();
 
-        Request {
+        Self {
             body: Resp::Array(Some(resp_arr)),
             consumed,
         }
     }
-    pub fn consumed(&self) -> usize {
+    pub const fn consumed(&self) -> usize {
         self.consumed
     }
 
@@ -93,8 +78,8 @@ impl Request {
 }
 
 impl Resp {
-    pub fn new_error(error: CommandError) -> Self {
-        Resp::Error(error.to_string())
+    pub fn new_error(error: &CommandError) -> Self {
+        Self::Error(error.to_string())
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -111,20 +96,19 @@ impl Resp {
 
     // A client request is always Array(Some([Bulk, Bulk, ...])) flatten to raw args.
     pub fn into_args(self) -> Option<Vec<Vec<u8>>> {
-        let Resp::Array(Some(items)) = self else {
+        let Self::Array(Some(items)) = self else {
             return None;
         };
         items
             .into_iter()
             .map(|item| match item {
-                Resp::Bulk(Some(bytes)) => Some(bytes),
+                Self::Bulk(Some(bytes)) => Some(bytes),
                 _ => None,
             })
             .collect()
     }
 }
 
-// TODO: MAKE it recursive
 // *{v.len()}\r\n then recurse e.encode(out) per element
 fn write_arr(out: &mut Vec<u8>, items: &[Resp]) {
     out.push(b'*');
@@ -172,7 +156,7 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod test {
-    use crate::resp::{Resp, parse_direct, parse_request};
+    use crate::resp::{Resp, parse_request};
 
     #[test]
     fn resp_full_line() {

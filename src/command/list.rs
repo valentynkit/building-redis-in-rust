@@ -1,7 +1,10 @@
 use std::os::fd::RawFd;
 
 use crate::{
-    command::CommandError,
+    command::{
+        CommandError,
+        common::{ExpCmd, get_ttl, parse_ttl},
+    },
     db::{Db, Key, Value},
     resp::{Reply, Resp},
 };
@@ -69,9 +72,15 @@ pub fn llen(db: &Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
 
 // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
 // directly without packing it into Array?
-pub fn blpop(db: &mut Db, key: &Vec<u8>, cur_fd: RawFd) -> Result<Reply, CommandError> {
+pub fn blpop(
+    db: &mut Db,
+    key: &Vec<u8>,
+    timeout: Option<&Vec<u8>>,
+    cur_fd: RawFd,
+) -> Result<Reply, CommandError> {
     let key: Key = key.into();
-    let resp = db.blpop(key.clone(), cur_fd).map(|item| {
+    let timeout = get_ttl(ExpCmd::Ex, timeout)?;
+    let resp = db.blpop(key.clone(), timeout, cur_fd).map(|item| {
         Resp::Array(Some(vec![
             Resp::Bulk(Some(key.into())),
             Resp::Bulk(Some(item.into())),

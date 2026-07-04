@@ -1,24 +1,14 @@
+pub mod common;
 mod list;
 mod string;
+use crate::command::common::CommandError;
 use crate::command::list::Side;
-use crate::db::{Db, Key, Value};
-use crate::resp::{self, Reply, Resp};
+use crate::db::Db;
+use crate::resp::{Reply, Resp};
 use std::os::fd::RawFd;
-use std::time::Duration;
 use strum::{AsRefStr, Display, EnumString};
-use thiserror::Error;
 use tracing::field::Empty;
 use tracing::{Span, debug, field, info, instrument};
-#[derive(Debug, Error, Clone)]
-
-pub enum CommandError {
-    #[error("unknown command '{0}'")]
-    Unknown(String),
-    #[error("wrong number of arguments for '{0}', expected: '{1}'")]
-    WrongArity(String, String),
-    #[error("wrong argument format: expected number. actual '{0}'")]
-    WrongNumber(String),
-}
 
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
@@ -35,18 +25,6 @@ pub enum Command {
     Blpop,
 }
 
-#[derive(AsRefStr, Debug, EnumString)]
-#[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
-pub enum ExpCmd {
-    Ex,
-    Px,
-}
-
-impl ExpCmd {
-    fn from_bytes(value: &[u8]) -> Option<Self> {
-        str::from_utf8(value).ok()?.parse().ok()
-    }
-}
 impl Command {
     const fn arity(self) -> i32 {
         match self {
@@ -103,7 +81,7 @@ pub fn handle(frame: Resp, db: &mut Db, client_fd: RawFd) -> Result<Reply, Comma
         Command::Llen => list::llen(db, &args[1]),
         Command::Lpop => list::lpop(db, &args[1], args.get(2)),
         Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
-        Command::Blpop => list::blpop(db, &args[1], client_fd),
+        Command::Blpop => list::blpop(db, &args[1], args.get(2), client_fd),
     }
 }
 
