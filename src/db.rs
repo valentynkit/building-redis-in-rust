@@ -232,6 +232,10 @@ impl Db {
     // error but return all the existing elements in this range
     // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
     // the key has no elements
+    pub fn list_exist(&self, key: &Key) -> bool {
+        self.lists.contains_key(key)
+    }
+
     pub fn list_get(&self, key: Key, mut from: i32, mut to: i32) -> Vec<&Value> {
         let Some(l) = self.lists.get(&key) else {
             return Vec::new();
