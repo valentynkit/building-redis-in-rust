@@ -1,14 +1,21 @@
-use core::{fmt, time};
+use core::fmt;
 use std::{
     borrow::Borrow,
     collections::{HashMap, VecDeque},
     mem,
-    os::fd::RawFd,
     time::{Duration, Instant},
 };
 
 use tracing::{debug, info};
 
+#[derive(Eq, Hash, PartialEq, Copy, Clone)]
+pub struct ClientId(usize);
+
+impl ClientId {
+    pub fn get(&self) -> usize {
+        self.0
+    }
+}
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
@@ -85,9 +92,9 @@ pub struct Db {
     keyspace: HashMap<Key, Value>,
     lists: HashMap<Key, VecDeque<Value>>,
     expires: HashMap<Key, Duration>,
-    // TODO: maybe extend VecDequeu<(RawFd, Duration) and than in server we could compare current
+    // TODO: maybe extend VecDequeu<(ClientId, Duration) and than in server we could compare current
     // time, if timeout, we could send null or whatever response to this client.
-    waiters: HashMap<Key, VecDeque<(RawFd, Option<Duration>)>>,
+    waiters: HashMap<Key, VecDeque<(ClientId, Option<Duration>)>>,
     outbox: Vec<Key>,
     start_ms: Instant,
     realtime_ms: Duration,
@@ -108,14 +115,14 @@ impl Db {
     }
 
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
-    pub fn handle_waiters(&mut self) -> HashMap<RawFd, Option<(Key, Value)>> {
-        let mut out: HashMap<RawFd, Option<(Key, Value)>> = HashMap::new();
+    pub fn handle_waiters(&mut self) -> HashMap<ClientId, Option<(Key, Value)>> {
+        let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
         // cleanup timeout waiters
         self.waiters.retain(|_key, waiters| {
-            waiters.retain(|(fd, timeout)| {
+            waiters.retain(|(client_id, timeout)| {
                 let is_expired = timeout.is_some_and(|timeout| timeout <= self.realtime_ms);
                 if is_expired {
-                    out.insert(*fd, None);
+                    out.insert(*client_id, None);
                 }
                 !is_expired
             });
@@ -171,7 +178,12 @@ impl Db {
         list.map_or(0, |list| list.len() as i64)
     }
 
-    pub fn blpop(&mut self, key: Key, timeout: Option<Duration>, cur_fd: RawFd) -> Option<Value> {
+    pub fn blpop(
+        &mut self,
+        key: Key,
+        timeout: Option<Duration>,
+        cur_client: ClientId,
+    ) -> Option<Value> {
         // TODO: could be refactored
         if let Some(list) = self.lists.get_mut(&key)
             && let Some(item) = list.pop_front()
@@ -182,7 +194,7 @@ impl Db {
         info!(%key, "adding waiter");
         let waiters = self.waiters.entry(key).or_default();
         let deadline = timeout.map(|t| self.realtime_ms + t);
-        waiters.push_back((cur_fd, deadline));
+        waiters.push_back((cur_client, deadline));
         None
     }
 
