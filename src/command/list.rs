@@ -128,3 +128,13 @@ pub fn lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Result<Reply, 
 
     Ok(Reply::Now(resp))
 }
+
+pub fn cmd_type(db: &mut Db, key: &Vec<u8>) -> Reply {
+    let key: Key = key.into();
+    let resp: Resp = if db.list_exist(&key) {
+        Resp::Simple("string".into())
+    } else {
+        Resp::Simple("none".into())
+    };
+    Reply::Now(resp)
+}
