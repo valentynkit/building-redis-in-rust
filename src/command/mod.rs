@@ -1,11 +1,11 @@
 pub mod common;
 mod list;
 mod string;
+use crate::client::ClientId;
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::resp::{Reply, Resp};
-use std::os::fd::RawFd;
 use strum::{AsRefStr, Display, EnumString};
 use tracing::field::Empty;
 use tracing::{Span, debug, field, info, instrument};
@@ -62,8 +62,8 @@ impl Command {
 
 /// All command handling lives here. This is the seam that grows into a Command enum.
 
-#[instrument(skip(frame, db, client_fd), fields(cmd = Empty))]
-pub fn handle(frame: Resp, db: &mut Db, client_fd: RawFd) -> Result<Reply, CommandError> {
+#[instrument(skip(frame, db, client_id), fields(cmd = Empty))]
+pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, CommandError> {
     let args: Vec<Vec<u8>> = frame
         .into_args()
         .ok_or_else(|| CommandError::Unknown(String::new()))?;
@@ -81,7 +81,7 @@ pub fn handle(frame: Resp, db: &mut Db, client_fd: RawFd) -> Result<Reply, Comma
         Command::Llen => list::llen(db, &args[1]),
         Command::Lpop => list::lpop(db, &args[1], args.get(2)),
         Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
-        Command::Blpop => list::blpop(db, &args[1], args.get(2), client_fd),
+        Command::Blpop => list::blpop(db, &args[1], args.get(2), client_id),
     }
 }
 

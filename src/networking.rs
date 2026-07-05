@@ -8,7 +8,7 @@ use mio::Token;
 use mio::net::TcpListener;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
-use crate::client::{Client, Disposition};
+use crate::client::{Client, ClientId, Disposition};
 use crate::db::Db;
 use crate::poll::Poller;
 use crate::resp::Resp;
@@ -57,7 +57,7 @@ impl Server {
         Ok(Self {
             listener,
             clients: HashMap::new(),
-            next_client_id: 1,
+            next_client_id: 0,
             poller,
             db,
             cronloops: 0,
@@ -76,7 +76,7 @@ impl Server {
     // HouseKeeping
     fn before_sleep(&mut self) {
         self.cronloops += 1;
-        // HM<i32, Option<(Key, Value)>> getting None for some fd, means that it timeout, and have
+        // HM<ClientId, Option<(Key, Value)>> getting None for some client_id, means that it timeout, and have
         // to receive response
         let waiters = self.db.handle_waiters();
         for (client_id, kv) in waiters {
@@ -136,7 +136,7 @@ impl Server {
                         continue;
                     }
                     info!(?addr, ?c_token, "connected client");
-                    let client = Client::new(stream);
+                    let client = Client::new(stream, ClientId::new(c_token.0));
                     self.clients.insert(c_token, client);
                 }
                 Err(e) if would_block(&e) => break,

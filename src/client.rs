@@ -5,7 +5,6 @@ use crate::command::{self};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
 
 pub const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
@@ -14,24 +13,35 @@ pub enum Disposition {
     Drop,
 }
 
+#[derive(Eq, Hash, Debug, PartialEq, Copy, Clone)]
+pub struct ClientId(usize);
+
+impl ClientId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+    pub fn get(&self) -> usize {
+        self.0
+    }
+}
+
 pub struct Client {
+    id: ClientId,
     stream: TcpStream,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
 }
 
 impl Client {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream, id: ClientId) -> Self {
         Self {
+            id,
             stream,
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
         }
     }
-    pub fn get_raw_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
-    }
-    /// Poller reported this fd readable: read, parse, run, reply.
+    /// Poller reported this client readable: read, parse, run, reply.
     pub fn on_readable(&mut self, db: &mut Db) -> Disposition {
         let mut stream = &self.stream;
         let mut buf = [0u8; READ_BUF];
@@ -69,8 +79,7 @@ impl Client {
         let mut out: Vec<Resp> = vec![];
         while let Some(request) = resp::parse_request(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
-            let cur_fd = self.stream.as_raw_fd();
-            let response = command::handle(request.body(), db, cur_fd);
+            let response = command::handle(request.body(), db, self.id);
             match response {
                 Ok(reply) => match reply {
                     Reply::Now(resp) => out.push(resp),

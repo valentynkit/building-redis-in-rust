@@ -1,9 +1,8 @@
-use std::os::fd::RawFd;
-
 use crate::{
+    client::ClientId,
     command::{
         CommandError,
-        common::{ExpCmd, get_ttl, parse_ttl},
+        common::{ExpCmd, get_ttl},
     },
     db::{Db, Key, Value},
     resp::{Reply, Resp},
@@ -76,11 +75,11 @@ pub fn blpop(
     db: &mut Db,
     key: &Vec<u8>,
     timeout: Option<&Vec<u8>>,
-    cur_fd: RawFd,
+    client_id: ClientId,
 ) -> Result<Reply, CommandError> {
     let key: Key = key.into();
     let timeout = get_ttl(ExpCmd::Ex, timeout)?;
-    let resp = db.blpop(key.clone(), timeout, cur_fd).map(|item| {
+    let resp = db.blpop(key.clone(), timeout, client_id).map(|item| {
         Resp::Array(Some(vec![
             Resp::Bulk(Some(key.into())),
             Resp::Bulk(Some(item.into())),

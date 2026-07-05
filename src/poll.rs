@@ -2,7 +2,6 @@
 //! Callers see `Poller` + `Ready` only — never epoll/kqueue types.
 //! Swap this module for mio/tokio later; `Server` won't change.
 use std::io;
-use std::os::fd::RawFd;
 
 const MAX_EVENTS: usize = 128;
 
