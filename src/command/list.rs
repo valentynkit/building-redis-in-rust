@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     client::ClientId,
     command::{
@@ -78,7 +80,13 @@ pub fn blpop(
     client_id: ClientId,
 ) -> Result<Reply, CommandError> {
     let key: Key = key.into();
-    let timeout = get_ttl(ExpCmd::Ex, timeout)?;
+    let timeout = get_ttl(ExpCmd::Ex, timeout)?.and_then(|timeout| {
+        if timeout == Duration::from_millis(0) {
+            None
+        } else {
+            Some(timeout)
+        }
+    });
     let resp = db.blpop(key.clone(), timeout, client_id).map(|item| {
         Resp::Array(Some(vec![
             Resp::Bulk(Some(key.into())),
@@ -86,10 +94,7 @@ pub fn blpop(
         ]))
     }); // None → key absent → caller writes $-1
 
-    match resp {
-        Some(resp) => Ok(Reply::Now(resp)),
-        None => Ok(Reply::Blocked),
-    }
+    resp.map_or(Ok(Reply::Blocked), |resp| Ok(Reply::Now(resp)))
 }
 
 pub fn lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Result<Reply, CommandError> {
