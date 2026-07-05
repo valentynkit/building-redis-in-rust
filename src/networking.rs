@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self};
 use std::os::fd::AsRawFd;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use mio::net::TcpListener;
@@ -75,11 +75,11 @@ impl Server {
     }
 
     // HouseKeeping
-    fn before_sleep(&mut self) {
+    fn before_sleep(&mut self) -> Option<Duration> {
         self.cronloops += 1;
         // HM<ClientId, Option<(Key, Value)>> getting None for some client_id, means that it timeout, and have
         // to receive response
-        let waiters = self.db.handle_waiters();
+        let (waiters, deadline) = self.db.handle_waiters();
         for (client_id, kv) in waiters {
             let client_id = Token(client_id.get());
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -105,6 +105,7 @@ impl Server {
                 }
             }
         }
+        deadline
     }
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
@@ -113,8 +114,8 @@ impl Server {
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
-            self.before_sleep();
-            self.poll.poll(&mut events, None)?;
+            let timeout = self.before_sleep();
+            self.poll.poll(&mut events, timeout)?;
             self.set_current_time()?;
             for event in &events {
                 if event.is_readable() {
