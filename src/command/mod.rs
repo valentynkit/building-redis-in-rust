@@ -1,5 +1,6 @@
 pub mod common;
 mod list;
+mod stream;
 mod string;
 use crate::client::ClientId;
 use crate::command::common::CommandError;
@@ -24,6 +25,7 @@ pub enum Command {
     Lpop,
     Blpop,
     Type,
+    Xadd,
 }
 
 impl Command {
@@ -39,6 +41,7 @@ impl Command {
             Self::Lpop => -2,
             Self::Blpop => -2,
             Self::Type => 2,
+            Self::Xadd => 5,
         }
     }
 
@@ -85,6 +88,7 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
         Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
         Command::Blpop => list::blpop(db, &args[1], args.get(2), client_id),
         Command::Type => Ok(string::cmd_type(db, &args[1])),
+        Command::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
     }
 }
 

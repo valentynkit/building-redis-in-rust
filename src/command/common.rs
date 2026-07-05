@@ -11,6 +11,8 @@ pub enum CommandError {
     WrongArity(String, String),
     #[error("wrong argument format: expected number. actual '{0}'")]
     WrongNumber(String),
+    #[error("key already exist with different type, expected: '{0}'")]
+    WrongType(String),
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
