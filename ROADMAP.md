@@ -1,4 +1,3 @@
-TODO:
-We should take the gradual step by step evolution from direct libc kqueue usage, to abstraction like rustix, mio etc... and than the tokio itself.
 
-Current phase is to make use of inbuf and write to a client.
+1. Rewrite Event driven architecture from direct Epoll/Kqueue into into
+2. Introduce an algo, blpop should propogate the ordered list of timeouts for waiters. than higher in the networking we should call the wait with the nearest timeout, than choose another one etc...

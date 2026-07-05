@@ -1,11 +1,11 @@
-use core::error;
 use std::collections::HashMap;
 use std::io::{self};
-use std::net::TcpListener;
-use std::os::fd::{AsRawFd, RawFd};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::os::fd::AsRawFd;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use mio::Token;
+use mio::net::TcpListener;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
 use crate::client::{Client, Disposition};
@@ -13,6 +13,8 @@ use crate::db::Db;
 use crate::poll::Poller;
 use crate::resp::Resp;
 const ADDR: &str = "127.0.0.1:6379";
+const LISTENER: Token = Token(0);
+
 pub struct StartTime {
     start_ms_mono: Instant,
 }
@@ -25,7 +27,8 @@ impl StartTime {
 
 pub struct Server {
     listener: TcpListener,
-    clients: HashMap<RawFd, Client>,
+    clients: HashMap<Token, Client>,
+    next_client_id: usize,
     poller: Poller,
     db: Db,
     cronloops: u64,
@@ -33,12 +36,17 @@ pub struct Server {
 }
 
 impl Server {
+    fn get_increased_id(&mut self) -> usize {
+        self.next_client_id += 1;
+        self.next_client_id
+    }
     pub fn new() -> Result<Self> {
-        let listener = server_start().context("starting listener")?;
-        let poller = Poller::new().context("creating poller")?;
+        let mut listener = server_start().context("starting listener")?;
+        let mut poller = Poller::new().context("creating poller")?;
         poller
-            .register(listener.as_raw_fd())
-            .context("registering listener fd")?;
+            .register(&mut listener, LISTENER)
+            .context("registering listener")?;
+
         // register the listener for "readable" = incoming connection
         let monotonic_ms = Instant::now();
         let realtime_ms = SystemTime::now()
@@ -49,6 +57,7 @@ impl Server {
         Ok(Self {
             listener,
             clients: HashMap::new(),
+            next_client_id: 1,
             poller,
             db,
             cronloops: 0,
@@ -70,12 +79,12 @@ impl Server {
         // HM<i32, Option<(Key, Value)>> getting None for some fd, means that it timeout, and have
         // to receive response
         let waiters = self.db.handle_waiters();
-        for (client_fd, kv) in waiters {
-            if let Some(client) = self.clients.get_mut(&client_fd) {
-                let client_fd = client.get_raw_fd();
+        for (client_id, kv) in waiters {
+            let client_id = Token(client_id.get());
+            if let Some(client) = self.clients.get_mut(&client_id) {
                 let resp = match kv {
                     Some((key, value)) => {
-                        info!(?client_fd, ?key, ?value, "writing to waiting clients");
+                        info!(?client_id, ?key, ?value, "writing to waiting clients");
                         Resp::Array(Some(vec![
                             Resp::Bulk(Some(key.into())),
                             Resp::Bulk(Some(value.into())),
@@ -91,7 +100,7 @@ impl Server {
 
                 if matches!(client.flush(), Disposition::Drop) {
                     warn!("removing client");
-                    self.clients.remove(&client_fd);
+                    self.clients.remove(&client_id);
                 }
             }
         }
@@ -99,9 +108,6 @@ impl Server {
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
     pub fn run(mut self) -> Result<()> {
-        let lfd = self.listener.as_raw_fd();
-        // Span::current().record("lfd", lfd);
-
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
@@ -109,11 +115,11 @@ impl Server {
             let events = self.poller.wait()?;
             self.set_current_time()?;
             for event in events {
-                if event.readable {
-                    if event.fd == lfd {
+                if event.is_readable() {
+                    if event.token() == LISTENER {
                         self.accept_client();
                     } else {
-                        self.service_client(event.fd);
+                        self.service_client(event.token());
                     }
                 }
             }
@@ -123,24 +129,18 @@ impl Server {
     fn accept_client(&mut self) {
         loop {
             match self.listener.accept() {
-                Ok((stream, addr)) => {
-                    // Accepted socket does NOT inherit the listener's nonblocking
-                    if let Err(error) = stream.set_nonblocking(true) {
-                        error!(?addr, ?error, "set_nonblocking failed");
+                Ok((mut stream, addr)) => {
+                    let c_token = Token(self.get_increased_id());
+                    if let Err(error) = self.poller.register(&mut stream, c_token) {
+                        error!(?c_token, ?error, "registration failed");
                         continue;
                     }
-                    let client_fd = stream.as_raw_fd();
-
-                    if let Err(error) = self.poller.register(client_fd) {
-                        error!(?client_fd, ?error, "registration failed");
-                        continue;
-                    }
-                    info!(?addr, ?client_fd, "connected client");
+                    info!(?addr, ?c_token, "connected client");
                     let client = Client::new(stream);
-                    self.clients.insert(client_fd, client);
+                    self.clients.insert(c_token, client);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if would_block(&e) => break,
+                Err(e) if interrupted(&e) => {}
                 Err(error) => {
                     error!(?error, "accept failed");
                     break;
@@ -150,23 +150,32 @@ impl Server {
     }
 
     #[instrument(skip(self))]
-    fn service_client(&mut self, fd: RawFd) {
-        if let Some(client) = self.clients.get_mut(&fd)
+    fn service_client(&mut self, token: Token) {
+        if let Some(client) = self.clients.get_mut(&token)
             && matches!(client.on_readable(&mut self.db), Disposition::Drop)
         {
             warn!("removing client");
-            self.clients.remove(&fd);
+            self.clients.remove(&token);
         }
     }
 }
 
 fn server_start() -> Result<TcpListener, anyhow::Error> {
-    let listener = TcpListener::bind(ADDR)?;
-    listener.set_nonblocking(true)?;
+    let addr = ADDR.parse().expect("should be valide IPv4 or IPv6");
+    let listener = mio::net::TcpListener::bind(addr)?;
+
     println!(
         "listening on {} (fd {})",
         listener.local_addr()?,
         listener.as_raw_fd()
     );
     Ok(listener)
+}
+
+fn would_block(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::WouldBlock
+}
+
+fn interrupted(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
 }

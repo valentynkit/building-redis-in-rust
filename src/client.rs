@@ -1,10 +1,10 @@
+use mio::net::TcpStream;
 use tracing::{debug, error, instrument, warn};
 
 use crate::command::{self};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
 
 pub const READ_BUF: usize = 512;
