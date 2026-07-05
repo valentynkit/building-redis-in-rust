@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{
     command::{CommandError, common::parse_ttl},
     db::{Db, Key},

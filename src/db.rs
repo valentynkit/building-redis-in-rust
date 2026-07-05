@@ -8,14 +8,7 @@ use std::{
 
 use tracing::{debug, info};
 
-#[derive(Eq, Hash, PartialEq, Copy, Clone)]
-pub struct ClientId(usize);
-
-impl ClientId {
-    pub fn get(&self) -> usize {
-        self.0
-    }
-}
+use crate::client::ClientId;
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
