@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{
     borrow::Borrow,
-    collections::{HashMap, VecDeque},
+    collections::{BinaryHeap, HashMap, VecDeque},
     mem,
     time::{Duration, Instant},
 };
@@ -108,14 +108,25 @@ impl Db {
     }
 
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
-    pub fn handle_waiters(&mut self) -> HashMap<ClientId, Option<(Key, Value)>> {
+    pub fn handle_waiters(
+        &mut self,
+    ) -> (HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>) {
+        let date_now = self.realtime_ms();
+        let mut nearest_deadline: Option<Duration> = None;
         let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
         // cleanup timeout waiters
         self.waiters.retain(|_key, waiters| {
             waiters.retain(|(client_id, timeout)| {
-                let is_expired = timeout.is_some_and(|timeout| timeout <= self.realtime_ms);
-                if is_expired {
-                    out.insert(*client_id, None);
+                let mut is_expired: bool = false;
+                if let Some(value) = timeout {
+                    is_expired = *value <= date_now;
+                    if is_expired {
+                        out.insert(*client_id, None);
+                    } else {
+                        let deadline = *value - date_now;
+                        nearest_deadline =
+                            Some(nearest_deadline.map_or(deadline, |cur| cur.min(deadline)));
+                    }
                 }
                 !is_expired
             });
@@ -139,7 +150,7 @@ impl Db {
                 out.insert(fd, Some((key.clone(), item)));
             }
         }
-        out
+        (out, nearest_deadline)
     }
     pub fn update_time(&mut self, realtime_ms: Duration) {
         self.realtime_ms = realtime_ms;
