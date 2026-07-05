@@ -1,14 +1,32 @@
 use core::fmt;
 use std::{
     borrow::Borrow,
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     mem,
     time::{Duration, Instant},
 };
 
-use tracing::{debug, info};
+type Stream = BTreeMap<(u64, u64), Vec<(Key, Value)>>;
+type Waiters = VecDeque<(ClientId, Option<Duration>)>;
 
-use crate::client::ClientId;
+use tracing::{debug, info};
+pub enum Object {
+    String(Value),
+    List(VecDeque<Value>),
+    Stream(Stream),
+}
+
+impl Object {
+    fn type_name(&self) -> &'static str {
+        match self {
+            Object::String(_) => "string",
+            Object::List(_) => "list",
+            Object::Stream(_) => "stream",
+        }
+    }
+}
+
+use crate::{client::ClientId, command::common::CommandError};
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
@@ -82,12 +100,11 @@ impl fmt::Display for Value {
 }
 
 pub struct Db {
-    keyspace: HashMap<Key, Value>,
-    lists: HashMap<Key, VecDeque<Value>>,
+    keyspace: HashMap<Key, Object>,
     expires: HashMap<Key, Duration>,
     // TODO: maybe extend VecDequeu<(ClientId, Duration) and than in server we could compare current
     // time, if timeout, we could send null or whatever response to this client.
-    waiters: HashMap<Key, VecDeque<(ClientId, Option<Duration>)>>,
+    waiters: HashMap<Key, Waiters>,
     outbox: Vec<Key>,
     start_ms: Instant,
     realtime_ms: Duration,
@@ -99,18 +116,54 @@ impl Db {
         Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
-            lists: HashMap::new(),
             waiters: HashMap::new(),
             outbox: Vec::new(),
             start_ms,
             realtime_ms,
         }
     }
+    fn as_string(&mut self, key: &Key) -> Result<Option<&Value>, CommandError> {
+        if self.expire_clean(key) {
+            return Ok(None);
+        }
+        match self.keyspace.get(key) {
+            None => Ok(None),
+            Some(Object::String(value)) => Ok(Some(value)),
+            Some(_) => Err(CommandError::WrongType("string".into())),
+        }
+    }
 
+    fn as_list(&mut self, key: &Key) -> Result<Option<&VecDeque<Value>>, CommandError> {
+        if self.expire_clean(key) {
+            return Ok(None);
+        }
+        match self.keyspace.get(key) {
+            None => Ok(None),
+            Some(Object::List(list)) => Ok(Some(list)),
+            Some(_) => Err(CommandError::WrongType("list".into())),
+        }
+    }
+    fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
+        if self.expire_clean(key) {
+            return Ok(None);
+        }
+        match self.keyspace.get(key) {
+            None => Ok(None),
+            Some(Object::Stream(stream)) => Ok(Some(stream)),
+            Some(_) => Err(CommandError::WrongType("stream".into())),
+        }
+    }
+    fn list_or_create(&mut self, key: &Key) -> Result<&mut VecDeque<Value>, CommandError> {
+        todo!()
+    }
+
+    fn stream_or_create(&mut self, key: &Key) -> Result<&mut Stream, CommandError> {
+        todo!()
+    }
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
     pub fn handle_waiters(
         &mut self,
-    ) -> (HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>) {
+    ) -> Result<(HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>), CommandError> {
         let date_now = self.realtime_ms();
         let mut nearest_deadline: Option<Duration> = None;
         let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
@@ -136,7 +189,7 @@ impl Db {
         let outbox = mem::take(&mut self.outbox);
         for key in &outbox {
             // Defence in Depth
-            while let Some(list) = self.lists.get_mut(key)
+            while let Some(list) = self.as_list(key)?
                 && !list.is_empty()
                 && let Some(waiters) = self.waiters.get_mut(key)
                 && !waiters.is_empty()
@@ -150,8 +203,9 @@ impl Db {
                 out.insert(fd, Some((key.clone(), item)));
             }
         }
-        (out, nearest_deadline)
+        Ok((out, nearest_deadline))
     }
+
     pub fn update_time(&mut self, realtime_ms: Duration) {
         self.realtime_ms = realtime_ms;
     }
@@ -164,8 +218,9 @@ impl Db {
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
-    pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> i64 {
-        let list = self.lists.entry(key.clone()).or_default();
+
+    pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
+        let list = self.list_or_create(&key)?;
         elems.into_iter().for_each(|e| list.push_front(e));
 
         if self.waiters.contains_key(&key) {
@@ -173,13 +228,13 @@ impl Db {
             self.outbox.push(key);
         }
 
-        list.len() as i64
+        Ok(list.len() as i64)
     }
 
-    pub fn list_len(&self, key: Key) -> i64 {
-        let list = self.lists.get(&key);
+    pub fn list_len(&mut self, key: Key) -> Result<i64, CommandError> {
+        let list = self.as_list(&key)?;
 
-        list.map_or(0, |list| list.len() as i64)
+        Ok(list.map_or(0, |list| list.len() as i64))
     }
 
     pub fn blpop(
@@ -187,35 +242,35 @@ impl Db {
         key: Key,
         timeout: Option<Duration>,
         cur_client: ClientId,
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, CommandError> {
         // TODO: could be refactored
-        if let Some(list) = self.lists.get_mut(&key)
+        if let Some(list) = self.as_list(&key)?
             && let Some(item) = list.pop_front()
         {
-            return Some(item);
+            return Ok(Some(item));
         }
 
         info!(%key, "adding waiter");
         let waiters = self.waiters.entry(key).or_default();
         let deadline = timeout.map(|t| self.realtime_ms + t);
         waiters.push_back((cur_client, deadline));
-        None
+        Ok(None)
     }
 
-    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> i64 {
-        let list = self.lists.entry(key.clone()).or_default();
+    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
+        let list = self.list_or_create(&key)?;
         list.extend(elems);
 
         if self.waiters.contains_key(&key) {
             self.outbox.push(key);
         }
-        list.len() as i64
+        Ok(list.len() as i64)
     }
 
-    pub fn list_pop(&mut self, key: &Key, len: usize) -> Vec<Value> {
+    pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
         let mut out: Vec<Value> = vec![];
-        let Some(list) = self.lists.get_mut(key) else {
-            return out;
+        let Some(list) = self.as_list(key)? else {
+            return Ok(out);
         };
 
         let len = len.min(list.len() - 1);
@@ -224,7 +279,7 @@ impl Db {
                 out.push(item);
             }
         }
-        out
+        Ok(out)
     }
 
     // TODO: potential improvements:
