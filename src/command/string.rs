@@ -22,3 +22,14 @@ pub fn set(
     db.setex(key.into(), value.into(), expiry);
     Ok(Reply::Now(Resp::Simple("OK".into())))
 }
+pub fn cmd_type(db: &mut Db, key: &Vec<u8>) -> Reply {
+    let key: Key = key.into();
+    let value = db.get(&key);
+
+    let resp: Resp = match value {
+        Some(_) => Resp::Simple("string".into()),
+        None => Resp::Simple("none".into()),
+    };
+
+    Reply::Now(resp)
+}
