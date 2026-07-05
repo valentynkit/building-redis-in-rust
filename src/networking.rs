@@ -4,16 +4,16 @@ use std::os::fd::AsRawFd;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use mio::Token;
 use mio::net::TcpListener;
+use mio::{Events, Interest, Poll, Token};
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
 use crate::client::{Client, ClientId, Disposition};
 use crate::db::Db;
-use crate::poll::Poller;
 use crate::resp::Resp;
 const ADDR: &str = "127.0.0.1:6379";
 const LISTENER: Token = Token(0);
+const MAX_EVENTS: usize = 128;
 
 pub struct StartTime {
     start_ms_mono: Instant,
@@ -29,7 +29,7 @@ pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
     next_client_id: usize,
-    poller: Poller,
+    poll: Poll,
     db: Db,
     cronloops: u64,
     start_time: StartTime,
@@ -42,9 +42,9 @@ impl Server {
     }
     pub fn new() -> Result<Self> {
         let mut listener = server_start().context("starting listener")?;
-        let mut poller = Poller::new().context("creating poller")?;
-        poller
-            .register(&mut listener, LISTENER)
+        let poll = Poll::new().context("creating poller")?;
+        poll.registry()
+            .register(&mut listener, LISTENER, Interest::READABLE)
             .context("registering listener")?;
 
         // register the listener for "readable" = incoming connection
@@ -54,11 +54,12 @@ impl Server {
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
         let db = Db::create(monotonic_ms, realtime_ms);
+
         Ok(Self {
             listener,
             clients: HashMap::new(),
             next_client_id: 0,
-            poller,
+            poll,
             db,
             cronloops: 0,
             start_time,
@@ -108,13 +109,14 @@ impl Server {
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
     pub fn run(mut self) -> Result<()> {
+        let mut events = Events::with_capacity(MAX_EVENTS);
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
             self.before_sleep();
-            let events = self.poller.wait()?;
+            self.poll.poll(&mut events, None)?;
             self.set_current_time()?;
-            for event in events {
+            for event in &events {
                 if event.is_readable() {
                     if event.token() == LISTENER {
                         self.accept_client();
@@ -131,10 +133,16 @@ impl Server {
             match self.listener.accept() {
                 Ok((mut stream, addr)) => {
                     let c_token = Token(self.get_increased_id());
-                    if let Err(error) = self.poller.register(&mut stream, c_token) {
+
+                    if let Err(error) =
+                        self.poll
+                            .registry()
+                            .register(&mut stream, c_token, Interest::READABLE)
+                    {
                         error!(?c_token, ?error, "registration failed");
                         continue;
                     }
+
                     info!(?addr, ?c_token, "connected client");
                     let client = Client::new(stream, ClientId::new(c_token.0));
                     self.clients.insert(c_token, client);
