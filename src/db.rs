@@ -6,10 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Stream = BTreeMap<(u64, u64), Vec<(Key, Value)>>;
+// (ms, seq); tuple order == redis id order, so a BTreeMap stays sorted for XRANGE
+pub type StreamId = (u64, u64);
+pub type Stream = BTreeMap<StreamId, Vec<(Key, Value)>>;
 type Waiters = VecDeque<(ClientId, Option<Duration>)>;
 
 use tracing::{debug, info};
+
+// one type per key; the tagged-union equivalent of C's robj + union pointer
 pub enum Object {
     String(Value),
     List(VecDeque<Value>),
@@ -17,7 +21,7 @@ pub enum Object {
 }
 
 impl Object {
-    fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Object::String(_) => "string",
             Object::List(_) => "list",
@@ -122,7 +126,9 @@ impl Db {
             realtime_ms,
         }
     }
-    fn as_string(&mut self, key: &Key) -> Result<Option<&Value>, CommandError> {
+
+    // Ok(None) = absent, Ok(Some) = right type, Err = wrong type
+    pub fn as_string(&mut self, key: &Key) -> Result<Option<&Value>, CommandError> {
         if self.expire_clean(key) {
             return Ok(None);
         }
@@ -143,7 +149,19 @@ impl Db {
             Some(_) => Err(CommandError::WrongType("list".into())),
         }
     }
-    fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
+
+    fn as_list_mut(&mut self, key: &Key) -> Result<Option<&mut VecDeque<Value>>, CommandError> {
+        if self.expire_clean(key) {
+            return Ok(None);
+        }
+        match self.keyspace.get_mut(key) {
+            None => Ok(None),
+            Some(Object::List(list)) => Ok(Some(list)),
+            Some(_) => Err(CommandError::WrongType("list".into())),
+        }
+    }
+
+    pub fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
         if self.expire_clean(key) {
             return Ok(None);
         }
@@ -153,17 +171,41 @@ impl Db {
             Some(_) => Err(CommandError::WrongType("stream".into())),
         }
     }
+
+    // or_insert_with only inserts when absent, so a wrong-type key isn't clobbered
     fn list_or_create(&mut self, key: &Key) -> Result<&mut VecDeque<Value>, CommandError> {
-        todo!()
+        match self
+            .keyspace
+            .entry(key.clone())
+            .or_insert_with(|| Object::List(VecDeque::new()))
+        {
+            Object::List(list) => Ok(list),
+            _ => Err(CommandError::WrongType("list".into())),
+        }
     }
 
-    fn stream_or_create(&mut self, key: &Key) -> Result<&mut Stream, CommandError> {
-        todo!()
+    pub fn stream_or_create(&mut self, key: &Key) -> Result<&mut Stream, CommandError> {
+        match self
+            .keyspace
+            .entry(key.clone())
+            .or_insert_with(|| Object::Stream(Stream::new()))
+        {
+            Object::Stream(stream) => Ok(stream),
+            _ => Err(CommandError::WrongType("stream".into())),
+        }
     }
+
+    pub fn key_type(&mut self, key: &Key) -> &'static str {
+        if self.expire_clean(key) {
+            return "none";
+        }
+        self.keyspace.get(key).map_or("none", Object::type_name)
+    }
+
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
     pub fn handle_waiters(
         &mut self,
-    ) -> Result<(HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>), CommandError> {
+    ) -> (HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>) {
         let date_now = self.realtime_ms();
         let mut nearest_deadline: Option<Duration> = None;
         let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
@@ -188,12 +230,21 @@ impl Db {
 
         let outbox = mem::take(&mut self.outbox);
         for key in &outbox {
-            // Defence in Depth
-            while let Some(list) = self.as_list(key)?
-                && !list.is_empty()
-                && let Some(waiters) = self.waiters.get_mut(key)
-                && !waiters.is_empty()
-            {
+            // index keyspace + waiters directly (not as_list_mut) so the two
+            // fields borrow disjointly
+            loop {
+                let Some(Object::List(list)) = self.keyspace.get_mut(key) else {
+                    break;
+                };
+                if list.is_empty() {
+                    break;
+                }
+                let Some(waiters) = self.waiters.get_mut(key) else {
+                    break;
+                };
+                if waiters.is_empty() {
+                    break;
+                }
                 let (fd, _timeout) = waiters
                     .pop_front()
                     .expect("queue is guaranteed by the is_empty check before");
@@ -203,7 +254,7 @@ impl Db {
                 out.insert(fd, Some((key.clone(), item)));
             }
         }
-        Ok((out, nearest_deadline))
+        (out, nearest_deadline)
     }
 
     pub fn update_time(&mut self, realtime_ms: Duration) {
@@ -222,13 +273,14 @@ impl Db {
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
         let list = self.list_or_create(&key)?;
         elems.into_iter().for_each(|e| list.push_front(e));
+        let len = list.len() as i64; // ends the borrow before we touch self below
 
         if self.waiters.contains_key(&key) {
             info!(%key, "adding outbox");
             self.outbox.push(key);
         }
 
-        Ok(list.len() as i64)
+        Ok(len)
     }
 
     pub fn list_len(&mut self, key: Key) -> Result<i64, CommandError> {
@@ -244,7 +296,7 @@ impl Db {
         cur_client: ClientId,
     ) -> Result<Option<Value>, CommandError> {
         // TODO: could be refactored
-        if let Some(list) = self.as_list(&key)?
+        if let Some(list) = self.as_list_mut(&key)?
             && let Some(item) = list.pop_front()
         {
             return Ok(Some(item));
@@ -260,16 +312,17 @@ impl Db {
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
         let list = self.list_or_create(&key)?;
         list.extend(elems);
+        let len = list.len() as i64; // ends the borrow before we touch self below
 
         if self.waiters.contains_key(&key) {
             self.outbox.push(key);
         }
-        Ok(list.len() as i64)
+        Ok(len)
     }
 
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
         let mut out: Vec<Value> = vec![];
-        let Some(list) = self.as_list(key)? else {
+        let Some(list) = self.as_list_mut(key)? else {
             return Ok(out);
         };
 
@@ -287,13 +340,18 @@ impl Db {
     // error but return all the existing elements in this range
     // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
     // the key has no elements
-    pub fn list_get(&self, key: Key, mut from: i32, mut to: i32) -> Vec<&Value> {
-        let Some(l) = self.lists.get(&key) else {
-            return Vec::new();
+    pub fn list_get(
+        &mut self,
+        key: &Key,
+        mut from: i32,
+        mut to: i32,
+    ) -> Result<Vec<&Value>, CommandError> {
+        let Some(l) = self.as_list(key)? else {
+            return Ok(Vec::new());
         };
         let len = l.len() as i32;
         if l.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if from < 0 {
             from = len as i32 + from;
@@ -304,11 +362,11 @@ impl Db {
         if to < 0 {
             to = len as i32 + to;
             if to < 0 || to < from {
-                return Vec::new();
+                return Ok(Vec::new());
             }
         }
         let to = to.min(len - 1);
-        l.range(from as usize..=to as usize).collect()
+        Ok(l.range(from as usize..=to as usize).collect())
     }
     // Lazy Epiration
     fn expire_clean(&mut self, key: &Key) -> bool {
@@ -324,22 +382,22 @@ impl Db {
         is_expired
     }
 
-    pub fn get(&mut self, key: &Key) -> Option<&Value> {
-        if self.expire_clean(key) {
+    fn set(&mut self, key: Key, value: Value) {
+        self.keyspace.insert(key, Object::String(value));
+    }
+
+    pub fn get(&mut self, key: Key) -> Option<&Object> {
+        if self.expire_clean(&key) {
             return None;
         }
-        self.keyspace.get(key)
+        self.keyspace.get(&key)
     }
 
-    fn set(&mut self, key: Key, value: Value) -> Option<Value> {
-        self.keyspace.insert(key, value)
-    }
-
-    pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) -> Option<Value> {
+    pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) {
         if let Some(ex) = ex_at {
             self.expires.insert(key.clone(), ex);
         }
 
-        self.set(key, value)
+        self.set(key, value);
     }
 }

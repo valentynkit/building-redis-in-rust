@@ -4,10 +4,10 @@ use crate::{
     resp::{Reply, Resp},
 };
 
-pub fn get(db: &mut Db, key: &Vec<u8>) -> Reply {
+pub fn get(db: &mut Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
     let key: Key = key.into();
-    let opt_value = db.get(&key).map(Into::into); // None → key absent → caller writes $-1
-    Reply::Now(Resp::Bulk(opt_value))
+    let opt_value = db.as_string(&key)?.map(Into::into); // None → key absent → caller writes $-1
+    Ok(Reply::Now(Resp::Bulk(opt_value)))
 }
 
 pub fn set(
@@ -24,12 +24,12 @@ pub fn set(
 }
 pub fn cmd_type(db: &mut Db, key: &Vec<u8>) -> Reply {
     let key: Key = key.into();
-    let value = db.get(&key);
+    let value = db.get(key);
 
-    let resp: Resp = match value {
-        Some(_) => Resp::Simple("string".into()),
-        None => Resp::Simple("none".into()),
-    };
+    let resp: Resp = value.map_or_else(
+        || Resp::Simple("none".into()),
+        |obj| Resp::Simple(obj.type_name().into()),
+    );
 
     Reply::Now(resp)
 }
