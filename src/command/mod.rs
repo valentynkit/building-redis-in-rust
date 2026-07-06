@@ -79,10 +79,10 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
     match kind {
         Command::Ping => Ok(cmd_ping()),
         Command::Echo => Ok(cmd_echo(&args[1])),
-        Command::Get => Ok(string::get(db, &args[1])),
+        Command::Get => string::get(db, &args[1]),
         Command::Set => string::set(db, &args[1], &args[2], args.get(3), args.get(4)),
-        Command::Lpush => list::push(db, Side::Front, &args[1], &args[2..args.len()]),
-        Command::Rpush => list::push(db, Side::Back, &args[1], &args[2..args.len()]),
+        Command::Lpush => list::push(db, &Side::Front, &args[1], &args[2..args.len()]),
+        Command::Rpush => list::push(db, &Side::Back, &args[1], &args[2..args.len()]),
         Command::Llen => list::llen(db, &args[1]),
         Command::Lpop => list::lpop(db, &args[1], args.get(2)),
         Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),

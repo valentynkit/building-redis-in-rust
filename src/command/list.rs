@@ -17,22 +17,22 @@ pub enum Side {
 
 pub fn push(
     db: &mut Db,
-    side: Side,
+    side: &Side,
     key: &Vec<u8>,
     elems: &[Vec<u8>],
 ) -> Result<Reply, CommandError> {
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(Into::into).collect();
     let out: i64 = match side {
-        Side::Front => db.list_prepand(key, elems),
-        Side::Back => db.list_append(key, elems),
+        Side::Front => db.list_prepand(key, elems)?,
+        Side::Back => db.list_append(key, elems)?,
     };
 
     Ok(Reply::Now(Resp::Integer(out)))
 }
 
 pub fn lrange(
-    db: &Db,
+    db: &mut Db,
     key: &Vec<u8>,
     num_from: &Vec<u8>,
     num_to: &Vec<u8>,
@@ -52,7 +52,7 @@ pub fn lrange(
         .ok_or_else(|| num_to_err)?;
 
     let items: Vec<Vec<u8>> = db
-        .list_get(key, num_from, num_to)
+        .list_get(&key, num_from, num_to)?
         .iter()
         .map(|&item| item.into())
         .collect();
@@ -65,9 +65,9 @@ pub fn lrange(
     Ok(Reply::Now(Resp::Array(Some(resp_arr))))
 }
 
-pub fn llen(db: &Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
+pub fn llen(db: &mut Db, key: &Vec<u8>) -> Result<Reply, CommandError> {
     let key: Key = key.into();
-    let out = db.list_len(key);
+    let out = db.list_len(key)?;
     Ok(Reply::Now(Resp::Integer(out)))
 }
 
@@ -87,7 +87,7 @@ pub fn blpop(
             Some(timeout)
         }
     });
-    let resp = db.blpop(key.clone(), timeout, client_id).map(|item| {
+    let resp = db.blpop(key.clone(), timeout, client_id)?.map(|item| {
         Resp::Array(Some(vec![
             Resp::Bulk(Some(key.into())),
             Resp::Bulk(Some(item.into())),
@@ -110,7 +110,7 @@ pub fn lpop(db: &mut Db, key: &Vec<u8>, num: Option<&Vec<u8>>) -> Result<Reply, 
     };
 
     let mut items: Vec<Vec<u8>> = db
-        .list_pop(&key, num_parsed)
+        .list_pop(&key, num_parsed)?
         .iter()
         .map(Into::into)
         .collect();
