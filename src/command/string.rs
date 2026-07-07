@@ -1,10 +1,10 @@
 use crate::{
-    command::{CommandError, common::parse_ttl},
+    command::common::{HandleCmdResult, parse_ttl},
     db::{Db, Key},
     resp::{Reply, Resp},
 };
 
-pub fn get(db: &mut Db, key: &[u8]) -> Result<Reply, CommandError> {
+pub fn get(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let opt_value = db.as_string(&key)?.map(Into::into); // None → key absent → caller writes $-1
     Ok(Reply::Now(Resp::Bulk(opt_value)))
@@ -16,7 +16,7 @@ pub fn set(
     value: &[u8],
     exp_cmd: Option<&[u8]>,
     exp: Option<&[u8]>,
-) -> Result<Reply, CommandError> {
+) -> HandleCmdResult {
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
     db.setex(key.into(), value.into(), expiry);
