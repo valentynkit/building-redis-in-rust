@@ -9,7 +9,7 @@ use mio::{Events, Interest, Poll, Token};
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
 use crate::client::{Client, ClientId, Disposition};
-use crate::db::Db;
+use crate::db::{Db, HandleWaitersResult};
 use crate::resp::Resp;
 const ADDR: &str = "127.0.0.1:6379";
 const LISTENER: Token = Token(0);
@@ -79,7 +79,7 @@ impl Server {
         self.cronloops += 1;
         // HM<ClientId, Option<(Key, Value)>> getting None for some client_id, means that it timeout, and have
         // to receive response
-        let (waiters, deadline) = self.db.handle_waiters();
+        let HandleWaitersResult(waiters, deadline) = self.db.handle_waiters();
         for (client_id, kv) in waiters {
             let client_id = Token(client_id.get());
             if let Some(client) = self.clients.get_mut(&client_id) {
