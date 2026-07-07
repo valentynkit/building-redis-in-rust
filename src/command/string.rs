@@ -24,7 +24,7 @@ pub fn set(
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();
-    let value = db.get(key);
+    let value = db.get(&key);
 
     let resp: Resp = value.map_or_else(
         || Resp::Simple("none".into()),

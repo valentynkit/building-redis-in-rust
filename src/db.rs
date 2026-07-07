@@ -28,11 +28,32 @@ impl StreamId {
             Err(CommandError::ParseStream(string.into()))
         }
     }
+
+    /*
+         XADD implementation must validate the provided ID based on the following rules:
+
+        The ID must be strictly greater than the last entry's ID.
+            The millisecondsTime portion of the new ID must be greater than or equal to the last entry's millisecondsTime.
+            If the millisecondsTime values are equal, the sequenceNumber of the new ID must be greater than the last entry's sequenceNumber.
+        If the stream is empty, the ID must be greater than 0-0. The minimum valid ID Redis accepts is 0-1.
+    */
+
+    pub const fn is_valid(&self, other: &Self) -> bool {
+        let ms_greater = self.0 > other.0;
+        let ms_equal_and_seq_greater = self.0 == other.0 && self.1 > other.1;
+        ms_greater || ms_equal_and_seq_greater
+    }
 }
 
 impl From<StreamId> for Vec<u8> {
     fn from(value: StreamId) -> Self {
         format!("{0}-{1}", value.0, value.1).into_bytes()
+    }
+}
+
+impl From<StreamId> for String {
+    fn from(value: StreamId) -> Self {
+        format!("{0}-{1}", value.0, value.1)
     }
 }
 use tracing::{debug, info};
@@ -406,11 +427,11 @@ impl Db {
         self.keyspace.insert(key, Object::String(value));
     }
 
-    pub fn get(&mut self, key: Key) -> Option<&Object> {
-        if self.expire_clean(&key) {
+    pub fn get(&mut self, key: &Key) -> Option<&Object> {
+        if self.expire_clean(key) {
             return None;
         }
-        self.keyspace.get(&key)
+        self.keyspace.get(key)
     }
 
     pub fn stream_add(
@@ -419,11 +440,15 @@ impl Db {
         stream_id: StreamId,
         elems: Vec<(Key, Value)>,
     ) -> Result<(), CommandError> {
-        let stream = self.stream_or_create(&key)?;
-        stream
-            .entry(stream_id)
-            .or_insert_with(Vec::new)
-            .extend(elems);
+        let stream = self.stream_or_create(key)?;
+        if let Some((id, _)) = stream.last_key_value()
+            && !stream_id.is_valid(id)
+        {
+            return Err(CommandError::InvalidStream(stream_id.into()));
+        }
+
+        let stream_values = stream.entry(stream_id).or_insert_with(Vec::new);
+        stream_values.extend(elems);
         Ok(())
     }
 
