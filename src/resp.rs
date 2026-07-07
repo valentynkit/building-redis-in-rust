@@ -46,6 +46,12 @@ pub enum Resp {
     Array(Option<Vec<Self>>),
 }
 
+impl<T: Into<Resp>> FromIterator<T> for Resp {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Resp::Array(Some(iter.into_iter().map(Into::into).collect()))
+    }
+}
+
 pub enum Reply {
     Now(Resp),
     Blocked,
