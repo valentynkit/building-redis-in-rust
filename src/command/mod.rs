@@ -9,7 +9,7 @@ use crate::db::Db;
 use crate::resp::{Reply, Resp};
 use strum::{AsRefStr, Display, EnumString};
 use tracing::field::Empty;
-use tracing::{Span, debug, field, info, instrument};
+use tracing::{debug, field, info, instrument, Span};
 
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
@@ -99,9 +99,9 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
 }
 
 fn cmd_ping() -> Reply {
-    Reply::Now(Resp::Simple("PONG".to_owned()))
+    Resp::Simple("PONG".to_owned()).into()
 }
 
 fn cmd_echo(arg: &[u8]) -> Reply {
-    Reply::Now(Resp::Bulk(Some(arg.into())))
+    Resp::Bulk(Some(arg.into())).into()
 }

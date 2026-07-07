@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{HandleCmdResult, parse_ttl},
+    command::common::{parse_ttl, HandleCmdResult},
     db::{Db, Key},
     resp::{Reply, Resp},
 };
@@ -7,7 +7,7 @@ use crate::{
 pub fn get(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let opt_value = db.as_string(&key)?.map(Into::into); // None → key absent → caller writes $-1
-    Ok(Reply::Now(Resp::Bulk(opt_value)))
+    Ok(Resp::Bulk(opt_value).into())
 }
 
 pub fn set(
@@ -20,7 +20,7 @@ pub fn set(
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
     db.setex(key.into(), value.into(), expiry);
-    Ok(Reply::Now(Resp::Simple("OK".into())))
+    Ok(Resp::Simple("OK".into()).into())
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();
@@ -31,7 +31,7 @@ pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
         |obj| Resp::Simple(obj.type_name().into()),
     );
 
-    Reply::Now(resp)
+    resp.into()
 }
 
 #[cfg(test)]
