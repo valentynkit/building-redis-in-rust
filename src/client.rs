@@ -108,11 +108,11 @@ impl Client {
 
 #[cfg(test)]
 mod test {
-    use super::{Client, Disposition};
+    use super::{Client, ClientId, Disposition};
     use crate::db::Db;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now()
@@ -134,20 +134,20 @@ mod test {
         buf
     }
 
-    /// A connected loopback pair: (peer we drive, stream the Client owns).
+    /// A connected loopback pair: (peer we drive, Client owning the other end).
     /// Both blocking — we always write before reading, so reads never stall.
-    fn pair() -> (TcpStream, TcpStream) {
+    fn pair() -> (TcpStream, Client) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = TcpStream::connect(addr).unwrap();
         let (owned, _) = listener.accept().unwrap();
-        (peer, owned)
+        let client = Client::new(mio::net::TcpStream::from_std(owned), ClientId::new(1));
+        (peer, client)
     }
 
     #[test]
     fn ping_round_trips() {
-        let (mut peer, owned) = pair();
-        let mut client = Client::new(owned);
+        let (mut peer, mut client) = pair();
         peer.write_all(&resp(&[b"PING"])).unwrap();
 
         assert!(matches!(client.on_readable(&mut db()), Disposition::Keep));
@@ -159,8 +159,7 @@ mod test {
 
     #[test]
     fn echo_returns_bulk() {
-        let (mut peer, owned) = pair();
-        let mut client = Client::new(owned);
+        let (mut peer, mut client) = pair();
         peer.write_all(&resp(&[b"ECHO", b"hey"])).unwrap();
 
         client.on_readable(&mut db());
@@ -173,8 +172,7 @@ mod test {
 
     #[test]
     fn pipelined_commands_each_reply() {
-        let (mut peer, owned) = pair();
-        let mut client = Client::new(owned);
+        let (mut peer, mut client) = pair();
         let mut frames = resp(&[b"PING"]); // two commands in one write,
         frames.extend(resp(&[b"PING"])); // delivered in a single read
         peer.write_all(&frames).unwrap();
@@ -190,8 +188,7 @@ mod test {
     /// (event 2 would re-send event 1's reply).
     #[test]
     fn outbuf_clears_between_events() {
-        let (mut peer, owned) = pair();
-        let mut client = Client::new(owned);
+        let (mut peer, mut client) = pair();
 
         let mut db = db();
         peer.write_all(&resp(&[b"PING"])).unwrap();
@@ -207,8 +204,7 @@ mod test {
 
     #[test]
     fn eof_drops_client() {
-        let (peer, owned) = pair();
-        let mut client = Client::new(owned);
+        let (peer, mut client) = pair();
         drop(peer); // peer hangs up
 
         assert!(matches!(client.on_readable(&mut db()), Disposition::Drop));

@@ -7,10 +7,34 @@ use std::{
 };
 
 // (ms, seq); tuple order == redis id order, so a BTreeMap stays sorted for XRANGE
-pub type StreamId = (u64, u64);
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct StreamId(u64, u64);
 pub type Stream = BTreeMap<StreamId, Vec<(Key, Value)>>;
 type Waiters = VecDeque<(ClientId, Option<Duration>)>;
 
+impl StreamId {
+    pub fn new(string: &str) -> Result<Self, CommandError> {
+        if let Some((left, right)) = string.split_once('-') {
+            let left: u64 = left
+                .parse()
+                .map_err(|_| CommandError::ParseStream(left.into()))?;
+
+            let right: u64 = right
+                .parse()
+                .map_err(|_| CommandError::ParseStream(right.into()))?;
+
+            Ok(Self(left, right))
+        } else {
+            Err(CommandError::ParseStream(string.into()))
+        }
+    }
+}
+
+impl From<StreamId> for Vec<u8> {
+    fn from(value: StreamId) -> Self {
+        format!("{0}-{1}", value.0, value.1).into_bytes()
+    }
+}
 use tracing::{debug, info};
 
 // one type per key; the tagged-union equivalent of C's robj + union pointer
@@ -53,18 +77,18 @@ impl From<Vec<u8>> for Value {
     }
 }
 
-impl From<&Vec<u8>> for Key {
-    fn from(value: &Vec<u8>) -> Self {
+impl From<&[u8]> for Key {
+    fn from(value: &[u8]) -> Self {
         Self {
-            value: value.clone(),
+            value: value.into(),
         }
     }
 }
 
-impl From<&Vec<u8>> for Value {
-    fn from(value: &Vec<u8>) -> Self {
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
         Self {
-            value: value.clone(),
+            value: value.into(),
         }
     }
 }
@@ -326,7 +350,7 @@ impl Db {
             return Ok(out);
         };
 
-        let len = len.min(list.len() - 1);
+        let len = len.min(list.len());
         for _ in 0..len {
             if let Some(item) = list.pop_front() {
                 out.push(item);
@@ -335,11 +359,8 @@ impl Db {
         Ok(out)
     }
 
-    // TODO: potential improvements:
-    // 1: when there are 3 elements, but range is 0-9 redis will not
-    // error but return all the existing elements in this range
-    // 2: Also we currently don't distinquish between the case when the key itself is missing, and when
-    // the key has no elements
+    // Redis clamps out-of-range indices to the available elements rather than erroring
+    // (e.g. LRANGE on a 3-element list with range 0-9 returns all 3, not an error).
     pub fn list_get(
         &mut self,
         key: &Key,
@@ -349,23 +370,22 @@ impl Db {
         let Some(l) = self.as_list(key)? else {
             return Ok(Vec::new());
         };
-        let len = l.len() as i32;
         if l.is_empty() {
             return Ok(Vec::new());
         }
+        let len = l.len() as i32;
+
         if from < 0 {
-            from = len as i32 + from;
-            if from < 0 {
-                from = 0;
-            }
+            from = (len + from).max(0);
         }
         if to < 0 {
-            to = len as i32 + to;
-            if to < 0 || to < from {
-                return Ok(Vec::new());
-            }
+            to += len;
         }
         let to = to.min(len - 1);
+
+        if from > to {
+            return Ok(Vec::new());
+        }
         Ok(l.range(from as usize..=to as usize).collect())
     }
     // Lazy Epiration
@@ -393,11 +413,145 @@ impl Db {
         self.keyspace.get(&key)
     }
 
+    pub fn stream_add(
+        &mut self,
+        key: &Key,
+        stream_id: StreamId,
+        elems: Vec<(Key, Value)>,
+    ) -> Result<(), CommandError> {
+        let stream = self.stream_or_create(&key)?;
+        stream
+            .entry(stream_id)
+            .or_insert_with(Vec::new)
+            .extend(elems);
+        Ok(())
+    }
+
     pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) {
         if let Some(ex) = ex_at {
             self.expires.insert(key.clone(), ex);
         }
 
         self.set(key, value);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn db() -> Db {
+        let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        Db::create(Instant::now(), realtime_ms)
+    }
+
+    #[test]
+    fn popping_an_emptied_list_again_does_not_panic() {
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        assert_eq!(db.list_pop(&key, 1).unwrap().len(), 1);
+        // key stays in keyspace as an empty list — popping again must not underflow.
+        assert_eq!(db.list_pop(&key, 1).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn setex_roundtrips_through_as_string() {
+        let mut db = db();
+        let key: Key = b"greeting".to_vec().into();
+        db.setex(key.clone(), b"hello".to_vec().into(), None);
+
+        let got = db.as_string(&key).unwrap().unwrap();
+        assert_eq!(Vec::<u8>::from(got), b"hello".to_vec());
+    }
+
+    #[test]
+    fn as_string_on_missing_key_is_ok_none() {
+        let mut db = db();
+        let key: Key = b"absent".to_vec().into();
+        assert!(db.as_string(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn as_string_on_list_key_is_wrong_type() {
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        assert!(matches!(
+            db.as_string(&key),
+            Err(CommandError::WrongType(_))
+        ));
+    }
+
+    #[test]
+    fn expired_key_reads_as_absent() {
+        let mut db = db();
+        let key: Key = b"greeting".to_vec().into();
+        let now = db.realtime_ms();
+        db.setex(key.clone(), b"hello".to_vec().into(), Some(now));
+
+        db.update_time(now + Duration::from_millis(1));
+
+        assert!(db.as_string(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn list_append_and_prepand_order_elements() {
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"b".to_vec().into()])
+            .unwrap();
+        db.list_prepand(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+
+        let items = db.list_get(&key, 0, -1).unwrap();
+        let items: Vec<Vec<u8>> = items.into_iter().map(Into::into).collect();
+        assert_eq!(items, vec![b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn list_get_out_of_range_indices_yield_empty() {
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+
+        assert!(db.list_get(&key, 10, 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn blpop_returns_immediately_when_list_has_items() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+
+        let got = db.blpop(key, None, ClientId::new(1)).unwrap().unwrap();
+        assert_eq!(Vec::<u8>::from(got), b"a".to_vec());
+    }
+
+    #[test]
+    fn blpop_registers_a_waiter_when_list_is_empty() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+
+        assert!(
+            db.blpop(key.clone(), None, ClientId::new(1))
+                .unwrap()
+                .is_none()
+        );
+
+        // a later push now delivers straight to the waiting client via the outbox.
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        let (mut delivered, _deadline) = db.handle_waiters();
+        let (got_key, got_value) = delivered.remove(&ClientId::new(1)).unwrap().unwrap();
+        assert_eq!(got_key, key);
+        assert_eq!(Vec::<u8>::from(got_value), b"a".to_vec());
     }
 }
