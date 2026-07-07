@@ -13,10 +13,8 @@ pub enum CommandError {
     WrongNumber(String),
     #[error("wrong argument format, could not parse stream: expected stream. actual '{0}'")]
     ParseStream(String),
-    #[error(
-        "The ID specified in XADD is equal or smaller than the target stream top item, streeam_id: '{0}'"
-    )]
-    InvalidStream(String),
+    #[error("The ID specified in XADD is equal or smaller than the target stream top item.")]
+    InvalidStream,
     #[error("key already exist with different type, expected: '{0}'")]
     WrongType(String),
 }

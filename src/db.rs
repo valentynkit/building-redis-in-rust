@@ -159,6 +159,11 @@ pub struct Db {
     realtime_ms: Duration,
 }
 
+pub struct HandleWaitersResult(
+    pub HashMap<ClientId, Option<(Key, Value)>>,
+    pub Option<Duration>,
+);
+
 impl Db {
     pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
         debug!("db initialized");
@@ -248,9 +253,7 @@ impl Db {
     }
 
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
-    pub fn handle_waiters(
-        &mut self,
-    ) -> (HashMap<ClientId, Option<(Key, Value)>>, Option<Duration>) {
+    pub fn handle_waiters(&mut self) -> HandleWaitersResult {
         let date_now = self.realtime_ms();
         let mut nearest_deadline: Option<Duration> = None;
         let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
@@ -299,7 +302,7 @@ impl Db {
                 out.insert(fd, Some((key.clone(), item)));
             }
         }
-        (out, nearest_deadline)
+        HandleWaitersResult(out, nearest_deadline)
     }
 
     pub fn update_time(&mut self, realtime_ms: Duration) {
@@ -444,7 +447,7 @@ impl Db {
         if let Some((id, _)) = stream.last_key_value()
             && !stream_id.is_valid(id)
         {
-            return Err(CommandError::InvalidStream(stream_id.into()));
+            return Err(CommandError::InvalidStream);
         }
 
         let stream_values = stream.entry(stream_id).or_insert_with(Vec::new);
@@ -463,7 +466,9 @@ impl Db {
 
 #[cfg(test)]
 mod test {
+
     use super::*;
+    use crate::db::HandleWaitersResult;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
@@ -574,7 +579,7 @@ mod test {
         // a later push now delivers straight to the waiting client via the outbox.
         db.list_append(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
-        let (mut delivered, _deadline) = db.handle_waiters();
+        let HandleWaitersResult(mut delivered, _deadline) = db.handle_waiters();
         let (got_key, got_value) = delivered.remove(&ClientId::new(1)).unwrap().unwrap();
         assert_eq!(got_key, key);
         assert_eq!(Vec::<u8>::from(got_value), b"a".to_vec());
