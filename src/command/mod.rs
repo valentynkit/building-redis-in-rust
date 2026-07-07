@@ -97,7 +97,7 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
         Command::Blpop => list::blpop(db, &args[1], args.get(2).map(Vec::as_slice), client_id),
         Command::Type => Ok(string::cmd_type(db, &args[1])),
         Command::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
-        Command::Xrange => stream::xrange(db, &args[1], &args[2], &args[2]),
+        Command::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
     }
 }
 
