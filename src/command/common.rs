@@ -11,6 +11,8 @@ pub enum CommandError {
     WrongArity(String, String),
     #[error("wrong argument format: expected number. actual '{0}'")]
     WrongNumber(String),
+    #[error("wrong argument format, could not parse stream: expected stream. actual '{0}'")]
+    ParseStream(String),
     #[error("key already exist with different type, expected: '{0}'")]
     WrongType(String),
 }
@@ -28,7 +30,7 @@ impl ExpCmd {
     }
 }
 
-pub fn get_ttl(cmd: ExpCmd, exp: Option<&Vec<u8>>) -> Result<Option<Duration>, CommandError> {
+pub fn get_ttl(cmd: &ExpCmd, exp: Option<&[u8]>) -> Result<Option<Duration>, CommandError> {
     let Some(exp) = exp else {
         return Ok(None);
     };
@@ -50,8 +52,8 @@ pub fn get_ttl(cmd: ExpCmd, exp: Option<&Vec<u8>>) -> Result<Option<Duration>, C
 }
 
 pub fn parse_ttl(
-    exp_cmd: Option<&Vec<u8>>,
-    exp: Option<&Vec<u8>>,
+    exp_cmd: Option<&[u8]>,
+    exp: Option<&[u8]>,
 ) -> Result<Option<Duration>, CommandError> {
     let (Some(cmd), Some(exp)) = (exp_cmd, exp) else {
         return Ok(None);
@@ -60,5 +62,59 @@ pub fn parse_ttl(
     let cmd = ExpCmd::from_bytes(cmd)
         .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(cmd).into_owned()))?;
 
-    get_ttl(cmd, Some(exp))
+    get_ttl(&cmd, Some(exp))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn get_ttl_without_expiry_is_none() {
+        assert!(get_ttl(&ExpCmd::Ex, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_ttl_ex_is_seconds() {
+        let got = get_ttl(&ExpCmd::Ex, Some(b"10".as_ref())).unwrap().unwrap();
+        assert_eq!(got, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn get_ttl_px_is_milliseconds() {
+        let got = get_ttl(&ExpCmd::Px, Some(b"500".as_ref()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn get_ttl_rejects_malformed_number() {
+        assert!(matches!(
+            get_ttl(&ExpCmd::Ex, Some(b"soon".as_ref())),
+            Err(CommandError::WrongNumber(_))
+        ));
+    }
+
+    #[test]
+    fn parse_ttl_without_cmd_or_exp_is_none() {
+        assert!(parse_ttl(None, None).unwrap().is_none());
+        assert!(parse_ttl(Some(b"EX".as_ref()), None).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_ttl_accepts_lowercase_ex() {
+        let got = parse_ttl(Some(b"ex".as_ref()), Some(b"1".as_ref()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn parse_ttl_rejects_unknown_cmd() {
+        assert!(matches!(
+            parse_ttl(Some(b"BOGUS".as_ref()), Some(b"1".as_ref())),
+            Err(CommandError::Unknown(_))
+        ));
+    }
 }

@@ -156,38 +156,98 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod test {
-    use crate::resp::{Resp, parse_request};
+    use crate::command::common::CommandError;
+    use crate::resp::{parse_request, Resp};
 
     #[test]
-    fn resp_full_line() {
-        let (args, n) = parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
-        assert_eq!(args, vec![b"ECHO".to_vec(), b"hey".to_vec()]);
-        assert_eq!(n, 23);
-    }
-    #[test]
-    fn direct_full_line() {
-        let (args, n) = parse_direct(b"PING\r\n").unwrap();
-        assert_eq!(args, vec![b"PING".to_vec()]);
-        assert_eq!(n, 6);
+    fn parses_array_of_bulk_strings() {
+        let req = parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
+        assert_eq!(req.consumed(), 23);
+        assert_eq!(
+            req.body().into_args().unwrap(),
+            vec![b"ECHO".to_vec(), b"hey".to_vec()]
+        );
     }
 
     #[test]
-    fn direct_splits_on_space() {
-        let (args, _) = parse_direct(b"ECHO hey\r\n").unwrap();
-        assert_eq!(args, vec![b"ECHO".to_vec(), b"hey".to_vec()]);
+    fn consumed_count_allows_pipelining() {
+        let buf = b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
+        let req = parse_request(buf).unwrap();
+        assert_eq!(req.consumed(), 14); // points exactly past the first command
+
+        let second = parse_request(&buf[req.consumed()..]).unwrap();
+        assert_eq!(second.body().into_args().unwrap(), vec![b"PING".to_vec()]);
     }
 
     #[test]
-    fn direct_incomplete_is_none() {
-        assert!(parse_direct(b"PING").is_none());
-        assert!(parse_direct(b"PING ").is_none());
-        assert!(parse_direct(b"PING \r").is_none());
-        assert!(parse_direct(b"PING\r").is_none());
-        assert!(parse_direct(b"\n").is_none());
+    fn rejects_non_array_input() {
+        assert!(parse_request(b"PING\r\n").is_none());
+        assert!(parse_request(b"").is_none());
     }
 
     #[test]
-    fn encodes_blpop_reply() {
+    fn incomplete_frame_is_none() {
+        assert!(parse_request(b"*1\r\n$4\r\nPIN").is_none()); // bulk body truncated
+        assert!(parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhe").is_none()); // second bulk truncated
+        assert!(parse_request(b"*1\r\n$4\r\nPING").is_none()); // missing trailing CRLF
+    }
+
+    #[test]
+    fn into_args_rejects_non_array() {
+        assert!(Resp::Simple("PONG".into()).into_args().is_none());
+    }
+
+    #[test]
+    fn into_args_rejects_non_bulk_elements() {
+        assert!(Resp::Array(Some(vec![Resp::Integer(1)]))
+            .into_args()
+            .is_none());
+    }
+
+    #[test]
+    fn encode_simple_string() {
+        let mut out = Vec::new();
+        Resp::Simple("PONG".into()).encode(&mut out);
+        assert_eq!(out, b"+PONG\r\n");
+    }
+
+    #[test]
+    fn encode_error() {
+        let mut out = Vec::new();
+        Resp::new_error(&CommandError::Unknown("frobnicate".into())).encode(&mut out);
+        assert_eq!(out, b"-ERR unknown command 'frobnicate'\r\n");
+    }
+
+    #[test]
+    fn encode_integer() {
+        let mut out = Vec::new();
+        Resp::Integer(42).encode(&mut out);
+        assert_eq!(out, b":42\r\n");
+    }
+
+    #[test]
+    fn encode_bulk_string() {
+        let mut out = Vec::new();
+        Resp::Bulk(Some(b"hey".to_vec())).encode(&mut out);
+        assert_eq!(out, b"$3\r\nhey\r\n");
+    }
+
+    #[test]
+    fn encode_null_bulk() {
+        let mut out = Vec::new();
+        Resp::Bulk(None).encode(&mut out);
+        assert_eq!(out, b"$-1\r\n");
+    }
+
+    #[test]
+    fn encode_null_array() {
+        let mut out = Vec::new();
+        Resp::Array(None).encode(&mut out);
+        assert_eq!(out, b"*-1\r\n");
+    }
+
+    #[test]
+    fn encode_array_of_bulk_strings() {
         let mut out = Vec::new();
         Resp::Array(Some(vec![
             Resp::Bulk(Some(b"apple".to_vec())),
@@ -195,31 +255,5 @@ mod test {
         ]))
         .encode(&mut out);
         assert_eq!(out, b"*2\r\n$5\r\napple\r\n$9\r\nblueberry\r\n");
-    }
-
-    #[test]
-    fn direct_consumed_count_allows_pipelining() {
-        let buf = b"PING\r\nECHO hey\r\n";
-        let (first, n) = parse_direct(buf).unwrap();
-        assert_eq!(first, vec![b"PING".to_vec()]);
-        assert_eq!(n, 6); // points exactly past the first \r\n
-
-        let (second, _) = parse_direct(&buf[n..]).unwrap();
-        assert_eq!(second, vec![b"ECHO".to_vec(), b"hey".to_vec()]);
-    }
-
-    #[test]
-    fn direct_bare_newline_terminates() {
-        let (args, n) = parse_direct(b"PING\n").unwrap();
-        assert_eq!(args, vec![b"PING".to_vec()]);
-        assert_eq!(n, 5);
-    }
-
-    #[test]
-    fn direct_leftover_after_command_waits() {
-        let (args, n) = parse_direct(b"PING\r\nXX").unwrap();
-        assert_eq!(args, vec![b"PING".to_vec()]);
-        assert_eq!(n, 6);
-        assert!(parse_direct(b"XX").is_none()); // partial remainder isn't a command yet
     }
 }
