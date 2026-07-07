@@ -1,4 +1,5 @@
 use core::fmt;
+use std::ops::Bound::Included;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -12,6 +13,11 @@ pub struct StreamId(u64, u64);
 pub type Stream = BTreeMap<StreamId, Vec<(Key, Value)>>;
 type Waiters = VecDeque<(ClientId, Option<Duration>)>;
 
+impl fmt::Display for StreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.0, self.1)
+    }
+}
 impl StreamId {
     pub fn parse(ms: &str, seq: &str) -> Result<Self, CommandError> {
         let ms: u64 = ms
@@ -21,6 +27,20 @@ impl StreamId {
             .parse()
             .map_err(|_| CommandError::ParseStream(seq.into()))?;
         Ok(Self(ms, seq))
+    }
+
+    pub fn parse_opt_seq(string: &str) -> Result<Self, CommandError> {
+        if string.contains('-') {
+            let Some((ms, seq)) = string.split_once('-') else {
+                return Err(CommandError::ParseStream(string.into()));
+            };
+            return Self::parse(ms, seq);
+        }
+        let ms: u64 = string
+            .parse()
+            .map_err(|_| CommandError::ParseStream(string.into()))?;
+
+        Ok(Self(ms, 0))
     }
 
     pub const fn is_valid(&self, other: &Self) -> bool {
@@ -70,6 +90,12 @@ impl From<StreamId> for String {
         format!("{0}-{1}", value.0, value.1)
     }
 }
+
+impl From<StreamId> for Resp {
+    fn from(value: StreamId) -> Self {
+        Resp::Bulk(Some(value.into()))
+    }
+}
 use tracing::{debug, info};
 
 // one type per key; the tagged-union equivalent of C's robj + union pointer
@@ -89,7 +115,7 @@ impl Object {
     }
 }
 
-use crate::{client::ClientId, command::common::CommandError};
+use crate::{client::ClientId, command::common::CommandError, resp::Resp};
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
@@ -142,6 +168,30 @@ impl From<Value> for Vec<u8> {
 impl From<&Value> for Vec<u8> {
     fn from(value: &Value) -> Vec<u8> {
         value.value.clone()
+    }
+}
+
+impl From<Key> for Resp {
+    fn from(value: Key) -> Self {
+        Resp::Bulk(Some(value.into()))
+    }
+}
+
+impl From<&Key> for Resp {
+    fn from(value: &Key) -> Self {
+        Resp::Bulk(Some(value.clone().into()))
+    }
+}
+
+impl From<Value> for Resp {
+    fn from(value: Value) -> Self {
+        Resp::Bulk(Some(value.into()))
+    }
+}
+
+impl From<&Value> for Resp {
+    fn from(value: &Value) -> Self {
+        Resp::Bulk(Some(value.into()))
     }
 }
 impl Borrow<[u8]> for Key {
@@ -450,7 +500,17 @@ impl Db {
         }
         self.keyspace.get(key)
     }
-
+    pub fn stream_range(
+        &mut self,
+        key: &Key,
+        start: StreamId,
+        end: StreamId,
+    ) -> Result<Vec<(&StreamId, &Vec<(Key, Value)>)>, CommandError> {
+        let Some(stream) = self.as_stream(key)? else {
+            return Ok(Vec::new());
+        };
+        Ok(stream.range((Included(start), Included(end))).collect())
+    }
     pub fn stream_add(
         &mut self,
         key: &Key,

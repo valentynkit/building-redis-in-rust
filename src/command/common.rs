@@ -3,6 +3,10 @@ use std::time::Duration;
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
+use crate::resp::Reply;
+
+pub type HandleCmdResult = Result<Reply, CommandError>;
+
 #[derive(Debug, Error, Clone)]
 pub enum CommandError {
     #[error("unknown command '{0}'")]

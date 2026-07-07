@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::{
     client::ClientId,
     command::{
+        common::{get_ttl, ExpCmd, HandleCmdResult},
         CommandError,
-        common::{ExpCmd, get_ttl},
     },
     db::{Db, Key, Value},
     resp::{Reply, Resp},
@@ -15,12 +15,7 @@ pub enum Side {
     Back,
 }
 
-pub fn push(
-    db: &mut Db,
-    side: &Side,
-    key: &[u8],
-    elems: &[Vec<u8>],
-) -> Result<Reply, CommandError> {
+pub fn push(db: &mut Db, side: &Side, key: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(|item| item.as_slice().into()).collect();
     let out: i64 = match side {
@@ -31,12 +26,7 @@ pub fn push(
     Ok(Reply::Now(Resp::Integer(out)))
 }
 
-pub fn lrange(
-    db: &mut Db,
-    key: &[u8],
-    num_from: &[u8],
-    num_to: &[u8],
-) -> Result<Reply, CommandError> {
+pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let num_from_err = CommandError::WrongNumber(String::from_utf8_lossy(num_from).into());
     let num_to_err = CommandError::WrongNumber(String::from_utf8_lossy(num_to).into());
@@ -53,15 +43,14 @@ pub fn lrange(
 
     let resp_arr = db
         .list_get(&key, num_from, num_to)?
-        .iter()
-        .map(|&item| item.into())
-        .map(|item| Resp::Bulk(Some(item)))
+        .into_iter()
+        .map(Resp::from)
         .collect::<Vec<Resp>>();
 
     Ok(Reply::Now(Resp::Array(Some(resp_arr))))
 }
 
-pub fn llen(db: &mut Db, key: &[u8]) -> Result<Reply, CommandError> {
+pub fn llen(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let out = db.list_len(key)?;
     Ok(Reply::Now(Resp::Integer(out)))
@@ -74,7 +63,7 @@ pub fn blpop(
     key: &[u8],
     timeout: Option<&[u8]>,
     client_id: ClientId,
-) -> Result<Reply, CommandError> {
+) -> HandleCmdResult {
     let key: Key = key.into();
     let timeout = get_ttl(&ExpCmd::Ex, timeout)?.and_then(|timeout| {
         if timeout == Duration::from_millis(0) {
@@ -83,17 +72,14 @@ pub fn blpop(
             Some(timeout)
         }
     });
-    let resp = db.blpop(key.clone(), timeout, client_id)?.map(|item| {
-        Resp::Array(Some(vec![
-            Resp::Bulk(Some(key.into())),
-            Resp::Bulk(Some(item.into())),
-        ]))
-    }); // None → key absent → caller writes $-1
+    let resp = db
+        .blpop(key.clone(), timeout, client_id)?
+        .map(|item| Resp::Array(Some(vec![Resp::from(key), Resp::from(item)]))); // None → key absent → caller writes $-1
 
     resp.map_or(Ok(Reply::Blocked), |resp| Ok(Reply::Now(resp)))
 }
 
-pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> Result<Reply, CommandError> {
+pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
     let key: Key = key.into();
 
     let num_parsed: usize = if let Some(num) = num {

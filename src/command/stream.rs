@@ -1,10 +1,36 @@
 use crate::{
-    command::common::CommandError,
-    db::{Db, Key, StreamIdSpec, Value},
-    resp::Reply,
+    command::common::{CommandError, HandleCmdResult},
+    db::{Db, Key, StreamId, StreamIdSpec, Value},
+    resp::{Reply, Resp},
 };
 
-pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> Result<Reply, CommandError> {
+pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
+    let key: Key = key.into();
+
+    let start = StreamId::parse_opt_seq(&String::from_utf8_lossy(start))?;
+    let end = StreamId::parse_opt_seq(&String::from_utf8_lossy(end))?;
+
+    if end < start {
+        return Err(CommandError::ParseStream(format!(
+            "Invalid Id range from {start} to {end}"
+        )));
+    }
+    let entries = db
+        .stream_range(&key, start, end)?
+        .into_iter()
+        .map(|(id, fields)| {
+            let field_arr = fields
+                .iter()
+                .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
+                .collect::<Vec<Resp>>();
+            Resp::Array(Some(vec![Resp::from(*id), Resp::Array(Some(field_arr))]))
+        })
+        .collect::<Vec<Resp>>();
+
+    Ok(Reply::Now(Resp::Array(Some(entries))))
+}
+
+pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
     let key: Key = key.into();
     let id_spec = StreamIdSpec::parse(&String::from_utf8_lossy(id))?;
     // 1: key, 2:value, 3:key etc...
@@ -20,5 +46,5 @@ pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> Result<Rep
         ));
     }
     let id = db.stream_add(&key, id_spec, kv_arr)?;
-    Ok(Reply::Now(crate::resp::Resp::Bulk(Some(id.into()))))
+    Ok(Reply::Now(Resp::from(id)))
 }
