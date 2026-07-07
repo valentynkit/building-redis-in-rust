@@ -41,13 +41,12 @@ pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> Handle
         .and_then(|item| item.parse().ok())
         .ok_or(num_to_err)?;
 
-    let resp_arr = db
+    let resp = db
         .list_get(&key, num_from, num_to)?
         .into_iter()
-        .map(Resp::from)
-        .collect::<Vec<Resp>>();
+        .collect::<Resp>();
 
-    Ok(Resp::Array(Some(resp_arr)).into())
+    Ok(resp.into())
 }
 
 pub fn llen(db: &mut Db, key: &[u8]) -> HandleCmdResult {
@@ -100,12 +99,10 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
     let resp = if items.len() == 1 {
         Resp::Bulk(items.pop())
     } else {
-        Resp::Array(Some(
-            items
-                .into_iter()
-                .map(|item| Resp::Bulk(Some(item)))
-                .collect::<Vec<Resp>>(),
-        ))
+        items
+            .into_iter()
+            .map(|item| Resp::Bulk(Some(item)))
+            .collect::<Resp>()
     };
 
     Ok(resp.into())

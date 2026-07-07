@@ -19,15 +19,15 @@ pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdRes
         .stream_range(&key, start, end)?
         .into_iter()
         .map(|(id, fields)| {
-            let field_arr = fields
+            let field_arr: Resp = fields
                 .iter()
                 .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
-                .collect::<Vec<Resp>>();
-            Resp::Array(Some(vec![Resp::from(*id), Resp::Array(Some(field_arr))]))
+                .collect();
+            Resp::Array(Some(vec![Resp::from(*id), field_arr]))
         })
-        .collect::<Vec<Resp>>();
+        .collect::<Resp>();
 
-    Ok(Resp::Array(Some(entries)).into())
+    Ok(entries.into())
 }
 
 pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
