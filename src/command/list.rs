@@ -23,7 +23,7 @@ pub fn push(db: &mut Db, side: &Side, key: &[u8], elems: &[Vec<u8>]) -> HandleCm
         Side::Back => db.list_append(key, elems)?,
     };
 
-    Ok(Reply::Now(Resp::Integer(out)))
+    Ok(Resp::Integer(out).into())
 }
 
 pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> HandleCmdResult {
@@ -47,13 +47,13 @@ pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> Handle
         .map(Resp::from)
         .collect::<Vec<Resp>>();
 
-    Ok(Reply::Now(Resp::Array(Some(resp_arr))))
+    Ok(Resp::Array(Some(resp_arr)).into())
 }
 
 pub fn llen(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let out = db.list_len(key)?;
-    Ok(Reply::Now(Resp::Integer(out)))
+    Ok(Resp::Integer(out).into())
 }
 
 // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
@@ -76,7 +76,7 @@ pub fn blpop(
         .blpop(key.clone(), timeout, client_id)?
         .map(|item| Resp::Array(Some(vec![Resp::from(key), Resp::from(item)]))); // None → key absent → caller writes $-1
 
-    resp.map_or(Ok(Reply::Blocked), |resp| Ok(Reply::Now(resp)))
+    resp.map_or(Ok(Reply::Blocked), |resp| Ok(resp.into()))
 }
 
 pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
@@ -108,7 +108,7 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
         ))
     };
 
-    Ok(Reply::Now(resp))
+    Ok(resp.into())
 }
 
 #[cfg(test)]

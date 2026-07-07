@@ -1,7 +1,7 @@
 use crate::{
     command::common::{CommandError, HandleCmdResult},
     db::{Db, Key, StreamId, StreamIdSpec, Value},
-    resp::{Reply, Resp},
+    resp::Resp,
 };
 
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
@@ -27,7 +27,7 @@ pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdRes
         })
         .collect::<Vec<Resp>>();
 
-    Ok(Reply::Now(Resp::Array(Some(entries))))
+    Ok(Resp::Array(Some(entries)).into())
 }
 
 pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
@@ -46,5 +46,5 @@ pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdR
         ));
     }
     let id = db.stream_add(&key, id_spec, kv_arr)?;
-    Ok(Reply::Now(Resp::from(id)))
+    Ok(Resp::from(id).into())
 }
