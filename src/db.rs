@@ -13,35 +13,49 @@ pub type Stream = BTreeMap<StreamId, Vec<(Key, Value)>>;
 type Waiters = VecDeque<(ClientId, Option<Duration>)>;
 
 impl StreamId {
-    pub fn new(string: &str) -> Result<Self, CommandError> {
-        if let Some((left, right)) = string.split_once('-') {
-            let left: u64 = left
-                .parse()
-                .map_err(|_| CommandError::ParseStream(left.into()))?;
-
-            let right: u64 = right
-                .parse()
-                .map_err(|_| CommandError::ParseStream(right.into()))?;
-
-            Ok(Self(left, right))
-        } else {
-            Err(CommandError::ParseStream(string.into()))
-        }
+    pub fn parse(ms: &str, seq: &str) -> Result<Self, CommandError> {
+        let ms: u64 = ms
+            .parse()
+            .map_err(|_| CommandError::ParseStream(ms.into()))?;
+        let seq: u64 = seq
+            .parse()
+            .map_err(|_| CommandError::ParseStream(seq.into()))?;
+        Ok(Self(ms, seq))
     }
-
-    /*
-         XADD implementation must validate the provided ID based on the following rules:
-
-        The ID must be strictly greater than the last entry's ID.
-            The millisecondsTime portion of the new ID must be greater than or equal to the last entry's millisecondsTime.
-            If the millisecondsTime values are equal, the sequenceNumber of the new ID must be greater than the last entry's sequenceNumber.
-        If the stream is empty, the ID must be greater than 0-0. The minimum valid ID Redis accepts is 0-1.
-    */
 
     pub const fn is_valid(&self, other: &Self) -> bool {
         let ms_greater = self.0 > other.0;
         let ms_equal_and_seq_greater = self.0 == other.0 && self.1 > other.1;
         ms_greater || ms_equal_and_seq_greater
+    }
+}
+
+// XADD accepts an explicit id, a ms part with an auto-generated sequence
+// (<ms>-*), or a fully auto-generated id (*).
+pub enum StreamIdSpec {
+    Explicit(StreamId),
+    AutoSeq(u64),
+    Auto,
+}
+
+impl StreamIdSpec {
+    pub fn parse(string: &str) -> Result<Self, CommandError> {
+        if string == "*" {
+            return Ok(Self::Auto);
+        }
+
+        let Some((ms, seq)) = string.split_once('-') else {
+            return Err(CommandError::ParseStream(string.into()));
+        };
+
+        if seq == "*" {
+            let ms: u64 = ms
+                .parse()
+                .map_err(|_| CommandError::ParseStream(ms.into()))?;
+            return Ok(Self::AutoSeq(ms));
+        }
+
+        Ok(Self::Explicit(StreamId::parse(ms, seq)?))
     }
 }
 
@@ -440,19 +454,44 @@ impl Db {
     pub fn stream_add(
         &mut self,
         key: &Key,
-        stream_id: StreamId,
+        id_spec: StreamIdSpec,
         elems: Vec<(Key, Value)>,
-    ) -> Result<(), CommandError> {
+    ) -> Result<StreamId, CommandError> {
+        let realtime_ms = self.realtime_ms.as_millis() as u64;
         let stream = self.stream_or_create(key)?;
-        if let Some((id, _)) = stream.last_key_value()
-            && !stream_id.is_valid(id)
+        let last = stream.last_key_value().map(|(id, _)| *id);
+
+        let stream_id = match id_spec {
+            StreamIdSpec::Explicit(id) => id,
+            StreamIdSpec::AutoSeq(ms) => {
+                let seq = match last {
+                    Some(StreamId(last_ms, last_seq)) if last_ms == ms => last_seq + 1,
+                    _ if ms == 0 => 1,
+                    _ => 0,
+                };
+                StreamId(ms, seq)
+            }
+            StreamIdSpec::Auto => {
+                let seq = match last {
+                    Some(StreamId(last_ms, last_seq)) if last_ms == realtime_ms => last_seq + 1,
+                    _ => 0,
+                };
+                StreamId(realtime_ms, seq)
+            }
+        };
+
+        if stream_id == StreamId(0, 0) {
+            return Err(CommandError::InvalidStreamZero);
+        }
+        if let Some(id) = last
+            && !stream_id.is_valid(&id)
         {
             return Err(CommandError::InvalidStream);
         }
 
         let stream_values = stream.entry(stream_id).or_insert_with(Vec::new);
         stream_values.extend(elems);
-        Ok(())
+        Ok(stream_id)
     }
 
     pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) {
@@ -562,6 +601,73 @@ mod test {
 
         let got = db.blpop(key, None, ClientId::new(1)).unwrap().unwrap();
         assert_eq!(Vec::<u8>::from(got), b"a".to_vec());
+    }
+
+    #[test]
+    fn stream_add_rejects_id_of_zero_zero() {
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+        assert!(matches!(
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(0, 0)), vec![]),
+            Err(CommandError::InvalidStreamZero)
+        ));
+    }
+
+    #[test]
+    fn stream_add_rejects_id_not_greater_than_top_item() {
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+        db.stream_add(&key, StreamIdSpec::Explicit(StreamId(1, 1)), vec![])
+            .unwrap();
+
+        assert!(matches!(
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(1, 1)), vec![]),
+            Err(CommandError::InvalidStream)
+        ));
+        assert!(matches!(
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(0, 3)), vec![]),
+            Err(CommandError::InvalidStream)
+        ));
+    }
+
+    #[test]
+    fn stream_add_auto_seq_increments_within_same_ms() {
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+
+        let first = db
+            .stream_add(&key, StreamIdSpec::AutoSeq(5), vec![])
+            .unwrap();
+        assert_eq!(String::from(first), "5-0");
+
+        let second = db
+            .stream_add(&key, StreamIdSpec::AutoSeq(5), vec![])
+            .unwrap();
+        assert_eq!(String::from(second), "5-1");
+    }
+
+    #[test]
+    fn stream_add_auto_seq_defaults_to_one_when_ms_is_zero() {
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+
+        let first = db
+            .stream_add(&key, StreamIdSpec::AutoSeq(0), vec![])
+            .unwrap();
+        assert_eq!(String::from(first), "0-1");
+    }
+
+    #[test]
+    fn stream_add_auto_generates_id_from_current_time() {
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+        let now_ms = db.realtime_ms().as_millis() as u64;
+
+        let first = db.stream_add(&key, StreamIdSpec::Auto, vec![]).unwrap();
+        assert_eq!(String::from(first), format!("{now_ms}-0"));
+
+        let second = db.stream_add(&key, StreamIdSpec::Auto, vec![]).unwrap();
+        assert_eq!(String::from(second), format!("{now_ms}-1"));
     }
 
     #[test]

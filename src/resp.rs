@@ -157,7 +157,7 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
-    use crate::resp::{parse_request, Resp};
+    use crate::resp::{Resp, parse_request};
 
     #[test]
     fn parses_array_of_bulk_strings() {
@@ -199,9 +199,11 @@ mod test {
 
     #[test]
     fn into_args_rejects_non_bulk_elements() {
-        assert!(Resp::Array(Some(vec![Resp::Integer(1)]))
-            .into_args()
-            .is_none());
+        assert!(
+            Resp::Array(Some(vec![Resp::Integer(1)]))
+                .into_args()
+                .is_none()
+        );
     }
 
     #[test]
