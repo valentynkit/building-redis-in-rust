@@ -30,6 +30,13 @@ impl StreamId {
     }
 
     pub fn parse_opt_seq(string: &str) -> Result<Self, CommandError> {
+        if string.len() == 1 {
+            match string {
+                "-" => return Ok(Self(0, 0)),
+                // TODO: + case
+                _ => return Err(CommandError::ParseStream(string.into())),
+            }
+        }
         if string.contains('-') {
             let Some((ms, seq)) = string.split_once('-') else {
                 return Err(CommandError::ParseStream(string.into()));
