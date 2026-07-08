@@ -43,7 +43,8 @@ pub fn xread(db: &mut Db, _mode: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
                 Resp::Array(Some(vec![Resp::from(*id), field_arr]))
             })
             .collect::<Resp>();
-        entries.push(stream_entries);
+
+        entries.push(Resp::Array(Some(vec![Resp::from(key), stream_entries])));
     }
 
     Ok(entries.into_iter().collect::<Resp>().into())
