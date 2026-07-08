@@ -4,6 +4,51 @@ use crate::{
     resp::Resp,
 };
 
+// STREAMS/BLOCK
+pub fn xread(db: &mut Db, _mode: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
+    if elems.is_empty() || !elems.len().is_multiple_of(2) {
+        return Err(CommandError::ParseStream("Invalid xread args".into()));
+    }
+    // Validate
+    let (keys, ids) = elems.split_at(elems.len() / 2);
+    if keys.len() != ids.len() {
+        return Err(CommandError::ParseStream("Invalid xread args".into()));
+    }
+    let mut entries: Vec<Resp> = vec![];
+    for idx in 0..keys.len() {
+        let key = keys
+            .get(idx)
+            .ok_or_else(|| CommandError::ParseStream("Invalid xread args".into()))?
+            .as_slice()
+            .into();
+
+        let id = &String::from_utf8_lossy(
+            ids.get(idx)
+                .ok_or_else(|| CommandError::ParseStream("Invalid xread args".into()))?,
+        );
+
+        // StreamId should exclusive, that why we incr by 1, from provided one
+        let mut id_start = StreamId::parse_opt_seq(id)?;
+        id_start.incr_seq();
+        let id_end = StreamId::parse_opt_seq("+")?;
+
+        let stream_entries = db
+            .stream_range(&key, id_start, id_end)?
+            .into_iter()
+            .map(|(id, fields)| {
+                let field_arr: Resp = fields
+                    .iter()
+                    .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
+                    .collect();
+                Resp::Array(Some(vec![Resp::from(*id), field_arr]))
+            })
+            .collect::<Resp>();
+        entries.push(stream_entries);
+    }
+
+    Ok(entries.into_iter().collect::<Resp>().into())
+}
+
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
 
