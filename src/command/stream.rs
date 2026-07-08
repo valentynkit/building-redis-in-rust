@@ -10,11 +10,12 @@ pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdRes
     let start = StreamId::parse_opt_seq(&String::from_utf8_lossy(start))?;
     let end = StreamId::parse_opt_seq(&String::from_utf8_lossy(end))?;
 
-    if end < start {
+    if end <= start {
         return Err(CommandError::ParseStream(format!(
             "Invalid Id range from {start} to {end}"
         )));
     }
+
     let entries = db
         .stream_range(&key, start, end)?
         .into_iter()
