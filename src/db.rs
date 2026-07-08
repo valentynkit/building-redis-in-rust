@@ -1,5 +1,6 @@
 use core::fmt;
 use std::ops::Bound::Included;
+use std::u64;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -33,7 +34,7 @@ impl StreamId {
         if string.len() == 1 {
             match string {
                 "-" => return Ok(Self(0, 0)),
-                // TODO: + case
+                "+" => return Ok(Self(u64::MAX, u64::MAX)),
                 _ => return Err(CommandError::ParseStream(string.into())),
             }
         }
