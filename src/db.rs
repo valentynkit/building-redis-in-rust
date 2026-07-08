@@ -20,6 +20,9 @@ impl fmt::Display for StreamId {
     }
 }
 impl StreamId {
+    pub const fn incr_seq(&mut self) {
+        self.1 += 1;
+    }
     pub fn parse(ms: &str, seq: &str) -> Result<Self, CommandError> {
         let ms: u64 = ms
             .parse()
