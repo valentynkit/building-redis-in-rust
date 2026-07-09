@@ -151,8 +151,10 @@ impl Client {
                 }
             }
             Reply::ExecTransaction => {
-                if self.mode != ClientMode::Transaction || self.queue.is_empty() {
+                if self.mode != ClientMode::Transaction {
                     Some(Resp::new_error(&CommandError::TransactionError))
+                } else if self.queue.is_empty() {
+                    Some(Resp::Array(None))
                 } else {
                     self.mode = ClientMode::Normal;
                     let resp_arr = self.exec_transaction(db);
