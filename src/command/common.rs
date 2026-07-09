@@ -7,6 +7,12 @@ use crate::resp::Reply;
 
 pub type HandleCmdResult = Result<Reply, CommandError>;
 
+pub enum BlockMode {
+    NotBlocking,
+    Forever,
+    Timeout(Duration),
+}
+
 #[derive(Debug, Error, Clone)]
 pub enum CommandError {
     #[error("unknown command '{0}'")]
