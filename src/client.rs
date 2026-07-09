@@ -154,6 +154,7 @@ impl Client {
                 if self.mode != ClientMode::Transaction {
                     Some(Resp::new_error(&CommandError::TransactionError))
                 } else if self.queue.is_empty() {
+                    self.mode = ClientMode::Normal;
                     Some(Resp::Array(Some(vec![])))
                 } else {
                     self.mode = ClientMode::Normal;
