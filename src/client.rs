@@ -58,13 +58,7 @@ impl Client {
         }
     }
 
-    pub fn exec_transaction(&mut self, db: &mut Db) -> Result<Vec<Resp>, CommandError> {
-        if self.mode != ClientMode::Transaction {
-            return Err(CommandError::TransactionError);
-        }
-        if self.queue.is_empty() {
-            return Err(CommandError::TransactionError);
-        }
+    pub fn exec_transaction(&mut self, db: &mut Db) -> Vec<Resp> {
         let mut out: Vec<Resp> = vec![];
         while let Some(item) = self.queue.pop_back() {
             let resp = self.process_request(db, item);
@@ -72,7 +66,7 @@ impl Client {
                 out.push(resp);
             }
         }
-        Ok(out)
+        out
     }
 
     pub fn add_to_transaction(&mut self, resp: Resp) -> Result<(), CommandError> {
@@ -158,12 +152,7 @@ impl Client {
                     Some(Resp::Array(Some(vec![])))
                 } else {
                     self.mode = ClientMode::Normal;
-                    let resp_arr = self.exec_transaction(db);
-                    let resp = match resp_arr {
-                        Ok(resp_arr) => Resp::Array(Some(resp_arr)),
-                        Err(err) => Resp::new_error(&err),
-                    };
-                    Some(resp)
+                    Some(Resp::Array(Some(self.exec_transaction(db))))
                 }
             }
             Reply::Blocked => None,
