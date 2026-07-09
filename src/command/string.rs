@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{parse_ttl, CommandError, HandleCmdResult},
+    command::common::{CommandError, HandleCmdResult, parse_ttl},
     db::{Db, Key},
     resp::{Reply, Resp},
 };
@@ -37,7 +37,7 @@ pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
 pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let result = db.incr(key)?;
-    Ok(Reply::Now(Resp::Integer(result)))
+    Ok(Resp::Integer(result).into())
 }
 
 #[cfg(test)]
