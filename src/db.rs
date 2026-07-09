@@ -65,6 +65,7 @@ impl StreamId {
 
 // XADD accepts an explicit id, a ms part with an auto-generated sequence
 // (<ms>-*), or a fully auto-generated id (*).
+#[derive(Copy, Clone)]
 pub enum StreamIdSpec {
     Explicit(StreamId),
     AutoSeq(u64),
@@ -119,11 +120,11 @@ pub enum Object {
 }
 
 impl Object {
-    pub fn type_name(&self) -> &'static str {
+    pub const fn type_name(&self) -> &'static str {
         match self {
-            Object::String(_) => "string",
-            Object::List(_) => "list",
-            Object::Stream(_) => "stream",
+            Self::String(_) => "string",
+            Self::List(_) => "list",
+            Self::Stream(_) => "stream",
         }
     }
 }
@@ -132,6 +133,23 @@ use crate::{client::ClientId, command::common::CommandError, resp::Resp};
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
+}
+
+impl Value {
+    pub fn from_int(num: i64) -> Self {
+        Self {
+            value: num.to_string().as_bytes().into(),
+        }
+    }
+
+    pub fn as_int(&self) -> Result<i64, CommandError> {
+        let number_err = CommandError::WrongType(String::from_utf8_lossy(&self.value).into());
+
+        str::from_utf8(&self.value)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(number_err)
+    }
 }
 
 #[derive(Eq, Default, Debug, Hash, PartialEq, Clone)]
@@ -672,6 +690,16 @@ impl Db {
         }
 
         self.set(key, value);
+    }
+    pub fn incr(&mut self, key: Key) -> Result<i64, CommandError> {
+        let value = self.as_string(&key)?;
+        let new_value = match value {
+            Some(value) => Value::from_int(value.as_int()? + 1),
+            None => Value::from_int(0),
+        };
+        let out = new_value.as_int()?;
+        self.set(key, new_value);
+        Ok(out)
     }
 }
 

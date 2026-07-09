@@ -9,7 +9,7 @@ use crate::db::Db;
 use crate::resp::{Reply, Resp};
 use strum::{AsRefStr, Display, EnumString};
 use tracing::field::Empty;
-use tracing::{debug, field, info, instrument, Span};
+use tracing::{Span, debug, field, info, instrument};
 
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
@@ -28,6 +28,7 @@ pub enum Command {
     Xadd,
     Xrange,
     Xread,
+    Incr,
 }
 
 impl Command {
@@ -46,6 +47,7 @@ impl Command {
             Self::Xadd => 5,
             Self::Xrange => 4,
             Self::Xread => -4,
+            Self::Incr => 2,
         }
     }
 
@@ -101,6 +103,7 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
         Command::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
         Command::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
         Command::Xread => stream::xread(db, client_id, &args[1..args.len()]),
+        Command::Incr => string::incr(db, &args[1]),
     }
 }
 
