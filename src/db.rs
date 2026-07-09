@@ -143,12 +143,10 @@ impl Value {
     }
 
     pub fn as_int(&self) -> Result<i64, CommandError> {
-        let number_err = CommandError::WrongType(String::from_utf8_lossy(&self.value).into());
-
         str::from_utf8(&self.value)
             .ok()
             .and_then(|s| s.parse().ok())
-            .ok_or(number_err)
+            .ok_or(CommandError::NotAnInteger)
     }
 }
 

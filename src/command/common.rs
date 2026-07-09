@@ -29,6 +29,8 @@ pub enum CommandError {
     InvalidStreamZero,
     #[error("key already exist with different type, expected: '{0}'")]
     WrongType(String),
+    #[error("value is not an integer or out of range")]
+    NotAnInteger,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
