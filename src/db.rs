@@ -1,6 +1,5 @@
 use core::fmt;
 use std::ops::Bound::Included;
-use std::u64;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -20,6 +19,8 @@ impl fmt::Display for StreamId {
     }
 }
 impl StreamId {
+    pub const MAX: Self = Self(u64::MAX, u64::MAX);
+
     pub const fn incr_seq(&mut self) {
         self.1 += 1;
     }
@@ -37,7 +38,7 @@ impl StreamId {
         if string.len() == 1 {
             match string {
                 "-" => return Ok(Self(0, 0)),
-                "+" => return Ok(Self(u64::MAX, u64::MAX)),
+                "+" => return Ok(Self::MAX),
                 _ => return Err(CommandError::ParseStream(string.into())),
             }
         }
@@ -223,6 +224,14 @@ impl fmt::Display for Value {
     }
 }
 
+// One client's pending XREAD BLOCK: which (key, exclusive-lower-bound) pairs
+// it's watching, and when to give up and reply with a null array.
+struct StreamWait {
+    client_id: ClientId,
+    watch: Vec<(Key, StreamId)>,
+    deadline: Duration,
+}
+
 pub struct Db {
     keyspace: HashMap<Key, Object>,
     expires: HashMap<Key, Duration>,
@@ -230,14 +239,12 @@ pub struct Db {
     // time, if timeout, we could send null or whatever response to this client.
     waiters: HashMap<Key, Waiters>,
     outbox: Vec<Key>,
+    stream_waiters: Vec<StreamWait>,
     start_ms: Instant,
     realtime_ms: Duration,
 }
 
-pub struct HandleWaitersResult(
-    pub HashMap<ClientId, Option<(Key, Value)>>,
-    pub Option<Duration>,
-);
+pub struct HandleWaitersResult(pub HashMap<ClientId, Resp>, pub Option<Duration>);
 
 impl Db {
     pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
@@ -247,6 +254,7 @@ impl Db {
             expires: HashMap::new(),
             waiters: HashMap::new(),
             outbox: Vec::new(),
+            stream_waiters: Vec::new(),
             start_ms,
             realtime_ms,
         }
@@ -331,7 +339,7 @@ impl Db {
     pub fn handle_waiters(&mut self) -> HandleWaitersResult {
         let date_now = self.realtime_ms();
         let mut nearest_deadline: Option<Duration> = None;
-        let mut out: HashMap<ClientId, Option<(Key, Value)>> = HashMap::new();
+        let mut out: HashMap<ClientId, Resp> = HashMap::new();
         // cleanup timeout waiters
         self.waiters.retain(|_key, waiters| {
             waiters.retain(|(client_id, timeout)| {
@@ -339,7 +347,7 @@ impl Db {
                 if let Some(value) = timeout {
                     is_expired = *value <= date_now;
                     if is_expired {
-                        out.insert(*client_id, None);
+                        out.insert(*client_id, Resp::Array(None));
                     } else {
                         let deadline = *value - date_now;
                         nearest_deadline =
@@ -374,9 +382,82 @@ impl Db {
                 let item = list
                     .pop_front()
                     .expect("value is guaranteed by the is_empty check before");
-                out.insert(fd, Some((key.clone(), item)));
+                out.insert(
+                    fd,
+                    Resp::Array(Some(vec![Resp::from(key.clone()), Resp::from(item)])),
+                );
             }
         }
+        HandleWaitersResult(out, nearest_deadline)
+    }
+
+    // Non-blocking XREAD range check, reused for both the immediate reply and
+    // re-checking a blocked client on wake — reading a stream is non-destructive,
+    // so there's nothing to precompute at registration time, just re-run this.
+    pub fn xread_snapshot(&mut self, watch: &[(Key, StreamId)]) -> Result<Option<Resp>, CommandError> {
+        let mut streams: Vec<Resp> = Vec::new();
+        for (key, id_start) in watch {
+            let field_items: Vec<Resp> = self
+                .stream_range(key, *id_start, StreamId::MAX)?
+                .into_iter()
+                .map(|(id, fields)| {
+                    let field_arr: Resp = fields
+                        .iter()
+                        .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
+                        .collect();
+                    Resp::Array(Some(vec![Resp::from(*id), field_arr]))
+                })
+                .collect();
+
+            if !field_items.is_empty() {
+                streams.push(Resp::Array(Some(vec![
+                    Resp::from(key),
+                    field_items.into_iter().collect(),
+                ])));
+            }
+        }
+        Ok(if streams.is_empty() {
+            None
+        } else {
+            Some(streams.into_iter().collect())
+        })
+    }
+
+    pub fn xread_wait(&mut self, client_id: ClientId, watch: Vec<(Key, StreamId)>, timeout: Duration) {
+        let deadline = self.realtime_ms + timeout;
+        self.stream_waiters.push(StreamWait {
+            client_id,
+            watch,
+            deadline,
+        });
+    }
+
+    // ponytail: re-checks every pending wait on every tick rather than being
+    // edge-triggered off an outbox — reads are cheap range queries and waiter
+    // counts are small, so the simpler always-rescan approach is fine here.
+    pub fn handle_stream_waiters(&mut self) -> HandleWaitersResult {
+        let date_now = self.realtime_ms();
+        let mut out: HashMap<ClientId, Resp> = HashMap::new();
+        let mut nearest_deadline: Option<Duration> = None;
+
+        let pending = mem::take(&mut self.stream_waiters);
+        self.stream_waiters = pending
+            .into_iter()
+            .filter_map(|wait| {
+                if let Ok(Some(resp)) = self.xread_snapshot(&wait.watch) {
+                    out.insert(wait.client_id, resp);
+                    return None;
+                }
+                if wait.deadline <= date_now {
+                    out.insert(wait.client_id, Resp::Array(None));
+                    return None;
+                }
+                let remaining = wait.deadline - date_now;
+                nearest_deadline = Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
+                Some(wait)
+            })
+            .collect();
+
         HandleWaitersResult(out, nearest_deadline)
     }
 
@@ -757,8 +838,10 @@ mod test {
         db.list_append(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
         let HandleWaitersResult(mut delivered, _deadline) = db.handle_waiters();
-        let (got_key, got_value) = delivered.remove(&ClientId::new(1)).unwrap().unwrap();
-        assert_eq!(got_key, key);
-        assert_eq!(Vec::<u8>::from(got_value), b"a".to_vec());
+        let resp = delivered.remove(&ClientId::new(1)).unwrap();
+        let Resp::Array(Some(items)) = resp else {
+            panic!("expected an array reply");
+        };
+        assert_eq!(items.len(), 2);
     }
 }

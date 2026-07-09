@@ -1,53 +1,70 @@
+use std::time::Duration;
+
 use crate::{
+    client::ClientId,
     command::common::{CommandError, HandleCmdResult},
     db::{Db, Key, StreamId, StreamIdSpec, Value},
-    resp::Resp,
+    resp::{Reply, Resp},
 };
 
-// STREAMS/BLOCK
-pub fn xread(db: &mut Db, _mode: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
+// Splits a leading `BLOCK <ms>` prefix off, if present. Returns the timeout
+// (if blocking) and the remaining args, still starting at `STREAMS`.
+fn parse_block_prefix(args: &[Vec<u8>]) -> Result<(Option<Duration>, &[Vec<u8>]), CommandError> {
+    let Some(kw) = args.first() else {
+        return Err(CommandError::ParseStream("Invalid xread args".into()));
+    };
+    if !kw.eq_ignore_ascii_case(b"block") {
+        return Ok((None, args));
+    }
+
+    let ms_bytes = args.get(1).map(Vec::as_slice).unwrap_or_default();
+    let ms: u64 = str::from_utf8(ms_bytes)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| CommandError::WrongNumber(String::from_utf8_lossy(ms_bytes).into_owned()))?;
+
+    Ok((Some(Duration::from_millis(ms)), &args[2..]))
+}
+
+fn expect_streams_keyword(args: &[Vec<u8>]) -> Result<&[Vec<u8>], CommandError> {
+    match args.first() {
+        Some(kw) if kw.eq_ignore_ascii_case(b"streams") => Ok(&args[1..]),
+        _ => Err(CommandError::ParseStream("Invalid xread args".into())),
+    }
+}
+
+pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdResult {
+    let (block, rest) = parse_block_prefix(args)?;
+    let elems = expect_streams_keyword(rest)?;
+
     if elems.is_empty() || !elems.len().is_multiple_of(2) {
         return Err(CommandError::ParseStream("Invalid xread args".into()));
     }
-    // Validate
     let (keys, ids) = elems.split_at(elems.len() / 2);
-    if keys.len() != ids.len() {
-        return Err(CommandError::ParseStream("Invalid xread args".into()));
-    }
-    let mut entries: Vec<Resp> = vec![];
-    for idx in 0..keys.len() {
-        let key = keys
-            .get(idx)
-            .ok_or_else(|| CommandError::ParseStream("Invalid xread args".into()))?
-            .as_slice()
-            .into();
 
-        let id = &String::from_utf8_lossy(
-            ids.get(idx)
-                .ok_or_else(|| CommandError::ParseStream("Invalid xread args".into()))?,
-        );
+    let watch: Vec<(Key, StreamId)> = keys
+        .iter()
+        .zip(ids)
+        .map(|(key, id)| {
+            let key: Key = key.as_slice().into();
+            // XREAD's id is exclusive, that's why we incr by 1 from the provided one
+            let mut id_start = StreamId::parse_opt_seq(&String::from_utf8_lossy(id))?;
+            id_start.incr_seq();
+            Ok((key, id_start))
+        })
+        .collect::<Result<_, CommandError>>()?;
 
-        // StreamId should exclusive, that why we incr by 1, from provided one
-        let mut id_start = StreamId::parse_opt_seq(id)?;
-        id_start.incr_seq();
-        let id_end = StreamId::parse_opt_seq("+")?;
-
-        let stream_entries = db
-            .stream_range(&key, id_start, id_end)?
-            .into_iter()
-            .map(|(id, fields)| {
-                let field_arr: Resp = fields
-                    .iter()
-                    .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
-                    .collect();
-                Resp::Array(Some(vec![Resp::from(*id), field_arr]))
-            })
-            .collect::<Resp>();
-
-        entries.push(Resp::Array(Some(vec![Resp::from(key), stream_entries])));
+    if let Some(resp) = db.xread_snapshot(&watch)? {
+        return Ok(resp.into());
     }
 
-    Ok(entries.into_iter().collect::<Resp>().into())
+    match block {
+        Some(timeout) => {
+            db.xread_wait(client_id, watch, timeout);
+            Ok(Reply::Blocked)
+        }
+        None => Ok(Resp::Array(None).into()),
+    }
 }
 
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
