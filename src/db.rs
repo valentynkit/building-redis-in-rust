@@ -695,7 +695,7 @@ impl Db {
         let value = self.as_string(&key)?;
         let new_value = match value {
             Some(value) => Value::from_int(value.as_int()? + 1),
-            None => Value::from_int(0),
+            None => Value::from_int(1),
         };
         let out = new_value.as_int()?;
         self.set(key, new_value);
