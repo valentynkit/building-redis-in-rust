@@ -3,7 +3,10 @@ use std::time::Duration;
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
-use crate::resp::Reply;
+use crate::{
+    db::Db,
+    resp::{Reply, Resp},
+};
 
 pub type HandleCmdResult = Result<Reply, CommandError>;
 
@@ -44,6 +47,9 @@ impl ExpCmd {
     fn from_bytes(value: &[u8]) -> Option<Self> {
         str::from_utf8(value).ok()?.parse().ok()
     }
+}
+pub fn multi(_db: &mut Db) -> HandleCmdResult {
+    Ok(Resp::Simple("OK".into()).into())
 }
 
 pub fn get_ttl(cmd: &ExpCmd, exp: Option<&[u8]>) -> Result<Option<Duration>, CommandError> {
