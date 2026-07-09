@@ -2,19 +2,18 @@ use std::time::Duration;
 
 use crate::{
     client::ClientId,
-    command::common::{CommandError, HandleCmdResult},
+    command::common::{BlockMode, CommandError, HandleCmdResult},
     db::{Db, Key, StreamId, StreamIdSpec, Value},
     resp::{Reply, Resp},
 };
-
 // Splits a leading `BLOCK <ms>` prefix off, if present. Returns the timeout
 // (if blocking) and the remaining args, still starting at `STREAMS`.
-fn parse_block_prefix(args: &[Vec<u8>]) -> Result<(Option<Duration>, &[Vec<u8>]), CommandError> {
+fn parse_block_prefix(args: &[Vec<u8>]) -> Result<(BlockMode, &[Vec<u8>]), CommandError> {
     let Some(kw) = args.first() else {
         return Err(CommandError::ParseStream("Invalid xread args".into()));
     };
     if !kw.eq_ignore_ascii_case(b"block") {
-        return Ok((None, args));
+        return Ok((BlockMode::NotBlocking, args));
     }
 
     let ms_bytes = args.get(1).map(Vec::as_slice).unwrap_or_default();
@@ -24,10 +23,10 @@ fn parse_block_prefix(args: &[Vec<u8>]) -> Result<(Option<Duration>, &[Vec<u8>])
         .ok_or_else(|| CommandError::WrongNumber(String::from_utf8_lossy(ms_bytes).into_owned()))?;
 
     // 0 = No timeout
-    let timeout = if ms == 0 {
-        None
+    let timeout: BlockMode = if ms == 0 {
+        BlockMode::Forever
     } else {
-        Some(Duration::from_millis(ms))
+        BlockMode::Timeout(Duration::from_millis(ms))
     };
 
     Ok((timeout, &args[2..]))
@@ -65,9 +64,19 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
     if let Some(resp) = db.xread_snapshot(&watch)? {
         return Ok(resp.into());
     }
-    // TODO:
-    db.xread_wait(client_id, watch, block);
-    Ok(Reply::Blocked)
+    let reply = match block {
+        BlockMode::NotBlocking => Reply::Now(Resp::Array(None)),
+        BlockMode::Forever => {
+            db.xread_wait(client_id, watch, None);
+            Reply::Blocked
+        }
+        BlockMode::Timeout(timeout) => {
+            db.xread_wait(client_id, watch, Some(timeout));
+            Reply::Blocked
+        }
+    };
+
+    Ok(reply)
 }
 
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
