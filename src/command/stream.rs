@@ -55,7 +55,9 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
         .map(|(key, id)| {
             let key: Key = key.as_slice().into();
             // XREAD's id is exclusive, that's why we incr by 1 from the provided one
-            let mut id_start = StreamId::parse_opt_seq(&String::from_utf8_lossy(id))?;
+            let stream = db.stream_or_create(&key)?;
+            let last = stream.last_key_value().map(|(id, _)| *id);
+            let mut id_start = StreamId::parse_opt_seq(&String::from_utf8_lossy(id), last)?;
             id_start.incr_seq();
             Ok((key, id_start))
         })
@@ -82,8 +84,8 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
 
-    let start = StreamId::parse_opt_seq(&String::from_utf8_lossy(start))?;
-    let end = StreamId::parse_opt_seq(&String::from_utf8_lossy(end))?;
+    let start = StreamId::parse_opt_seq(&String::from_utf8_lossy(start), None)?;
+    let end = StreamId::parse_opt_seq(&String::from_utf8_lossy(end), None)?;
 
     if end <= start {
         return Err(CommandError::ParseStream(format!(
