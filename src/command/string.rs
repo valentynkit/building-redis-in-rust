@@ -20,7 +20,7 @@ pub fn set(
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
     db.setex(key.into(), value.into(), expiry);
-    Ok(Resp::Simple("OK".into()).into())
+    Ok(Resp::new_ok().into())
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();

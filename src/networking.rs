@@ -19,7 +19,7 @@ pub struct StartTime {
 }
 
 impl StartTime {
-    pub fn new(start_ms_mono: Instant) -> Self {
+    pub const fn new(start_ms_mono: Instant) -> Self {
         Self { start_ms_mono }
     }
 }
@@ -35,10 +35,11 @@ pub struct Server {
 }
 
 impl Server {
-    fn get_increased_id(&mut self) -> usize {
+    const fn get_increased_id(&mut self) -> usize {
         self.next_client_id += 1;
         self.next_client_id
     }
+
     pub fn new() -> Result<Self> {
         let mut listener = server_start().context("starting listener")?;
         let poll = Poll::new().context("creating poller")?;

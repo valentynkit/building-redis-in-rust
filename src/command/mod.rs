@@ -2,7 +2,7 @@ pub mod common;
 mod list;
 mod stream;
 mod string;
-use crate::client::ClientId;
+use crate::client::{Client, ClientId, ClientMode};
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
@@ -10,6 +10,30 @@ use crate::resp::{Reply, Resp};
 use strum::{AsRefStr, Display, EnumString};
 use tracing::field::Empty;
 use tracing::{Span, debug, field, info, instrument};
+
+#[derive(Copy, Clone)]
+pub struct ClientInfo {
+    id: ClientId,
+    mode: ClientMode,
+}
+impl ClientInfo {
+    pub fn new(id: ClientId, mode: ClientMode) -> Self {
+        Self { id, mode }
+    }
+}
+pub struct RequestCmd {
+    frame: Resp,
+    client: ClientInfo,
+}
+
+impl RequestCmd {
+    pub fn new(frame: Resp, client: ClientInfo) -> Self {
+        Self { frame, client }
+    }
+    pub fn update_frame(&mut self, frame: Resp) {
+        self.frame = frame;
+    }
+}
 
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
@@ -30,6 +54,7 @@ pub enum Command {
     Xread,
     Incr,
     Multi,
+    Exec,
 }
 
 impl Command {
@@ -49,7 +74,7 @@ impl Command {
             Self::Xrange => 4,
             Self::Xread => -4,
             Self::Incr => 2,
-            Self::Multi => 1,
+            Self::Multi | Self::Exec => 1,
         }
     }
 
@@ -72,18 +97,12 @@ impl Command {
             .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(value).into_owned()))
     }
 }
-
-/// All command handling lives here. This is the seam that grows into a Command enum.
-
-#[instrument(skip(frame, db, client_id), fields(cmd = Empty))]
-pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, CommandError> {
-    let args: Vec<Vec<u8>> = frame
-        .into_args()
-        .ok_or_else(|| CommandError::Unknown(String::new()))?;
-    let kind: Command = Command::from_bytes(&args[0])?;
-    kind.check_arity(args.len())?;
-    Span::current().record("cmd", field::display(&kind));
-    info!(command = ?kind, "handling cmd");
+fn handle_normal_mode(
+    db: &mut Db,
+    kind: Command,
+    args: Vec<Vec<u8>>,
+    client_id: ClientId,
+) -> Result<Reply, CommandError> {
     match kind {
         Command::Ping => Ok(cmd_ping()),
         Command::Echo => Ok(cmd_echo(&args[1])),
@@ -106,7 +125,37 @@ pub fn handle(frame: Resp, db: &mut Db, client_id: ClientId) -> Result<Reply, Co
         Command::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
         Command::Xread => stream::xread(db, client_id, &args[1..args.len()]),
         Command::Incr => string::incr(db, &args[1]),
-        Command::Multi => common::multi(db),
+        Command::Multi => Ok(Reply::StartTransaction),
+        Command::Exec => Err(CommandError::TransactionError),
+    }
+}
+
+fn handle_transaction_mode(kind: Command, args: Vec<Vec<u8>>) -> Result<Reply, CommandError> {
+    // rebuild the request
+    match kind {
+        Command::Exec => Ok(Reply::ExecTransaction),
+        Command::Multi => Err(CommandError::TransactionError),
+        _ => Ok(common::get_initial_request(args)),
+    }
+}
+
+/// All command handling lives here. This is the seam that grows into a Command enum.
+#[instrument(skip(request, db), fields(cmd = Empty))]
+pub fn handle(db: &mut Db, request: RequestCmd) -> Result<Reply, CommandError> {
+    let args: Vec<Vec<u8>> = request
+        .frame
+        .into_args()
+        .ok_or_else(|| CommandError::Unknown(String::new()))?;
+
+    let kind: Command = Command::from_bytes(&args[0])?;
+    let client = request.client;
+    kind.check_arity(args.len())?;
+    Span::current().record("cmd", field::display(&kind));
+    info!(command = ?kind, "handling cmd");
+    let client_mode = request.client.mode;
+    match client_mode {
+        ClientMode::Normal => handle_normal_mode(db, kind, args, client.id),
+        ClientMode::Transaction => handle_transaction_mode(kind, args),
     }
 }
 

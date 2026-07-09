@@ -54,6 +54,9 @@ impl<T: Into<Resp>> FromIterator<T> for Resp {
 
 pub enum Reply {
     Now(Resp),
+    StartTransaction,
+    AddTransaction(Resp),
+    ExecTransaction,
     Blocked,
 }
 
@@ -93,7 +96,13 @@ impl Resp {
     pub fn new_error(error: &CommandError) -> Self {
         Self::Error(error.to_string())
     }
+    pub fn new_queued() -> Self {
+        Self::Simple("QUEUED".into())
+    }
 
+    pub fn new_ok() -> Self {
+        Self::Simple("OK".into())
+    }
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Simple(s) => write_simple_string(out, s),
@@ -169,7 +178,7 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
-    use crate::resp::{parse_request, Resp};
+    use crate::resp::{Resp, parse_request};
 
     #[test]
     fn parses_array_of_bulk_strings() {
@@ -211,9 +220,11 @@ mod test {
 
     #[test]
     fn into_args_rejects_non_bulk_elements() {
-        assert!(Resp::Array(Some(vec![Resp::Integer(1)]))
-            .into_args()
-            .is_none());
+        assert!(
+            Resp::Array(Some(vec![Resp::Integer(1)]))
+                .into_args()
+                .is_none()
+        );
     }
 
     #[test]

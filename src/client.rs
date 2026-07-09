@@ -1,9 +1,12 @@
 use mio::net::TcpStream;
 use tracing::{debug, error, instrument, warn};
 
-use crate::command::{self};
+use crate::command::common::CommandError;
+use crate::command::{self, ClientInfo, RequestCmd};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
+
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 
 pub const READ_BUF: usize = 512;
@@ -17,26 +20,76 @@ pub enum Disposition {
 pub struct ClientId(usize);
 
 impl ClientId {
-    pub fn new(id: usize) -> Self {
+    pub const fn new(id: usize) -> Self {
         Self(id)
     }
-    pub fn get(&self) -> usize {
+    pub const fn get(&self) -> usize {
         self.0
     }
+}
+
+// Transaction = Multi mode for queuing transactions and executing with EXEC
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum ClientMode {
+    Normal,
+    Transaction,
 }
 
 pub struct Client {
     id: ClientId,
     stream: TcpStream,
+    mode: ClientMode,
+    queue: VecDeque<Resp>,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
 }
 
 impl Client {
+    pub const fn make_normal_mode(&mut self) {
+        self.mode = ClientMode::Normal;
+    }
+
+    pub fn start_transaction(&mut self) -> Result<(), CommandError> {
+        if self.mode == ClientMode::Transaction {
+            Err(CommandError::TransactionError)
+        } else {
+            self.mode = ClientMode::Transaction;
+            Ok(())
+        }
+    }
+
+    pub fn exec_transaction(&mut self, db: &mut Db) -> Result<Vec<Resp>, CommandError> {
+        if self.mode != ClientMode::Transaction {
+            return Err(CommandError::TransactionError);
+        }
+        if self.queue.is_empty() {
+            return Err(CommandError::TransactionError);
+        }
+        let mut out: Vec<Resp> = vec![];
+        while let Some(item) = self.queue.pop_back() {
+            let resp = self.process_request(db, item);
+            if let Some(resp) = resp {
+                out.push(resp);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn add_to_transaction(&mut self, resp: Resp) -> Result<(), CommandError> {
+        if self.mode == ClientMode::Transaction {
+            self.queue.push_front(resp);
+            Ok(())
+        } else {
+            Err(CommandError::TransactionError)
+        }
+    }
+
     pub fn new(stream: TcpStream, id: ClientId) -> Self {
         Self {
             id,
             stream,
+            mode: ClientMode::Normal,
+            queue: VecDeque::new(),
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
         }
@@ -74,21 +127,66 @@ impl Client {
         resp.encode(&mut self.outbuf);
     }
 
+    // TODO: improve this STATE machinge and state transitions
+    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Option<Resp> {
+        match reply {
+            Reply::Now(resp) => {
+                // self.make_normal_mode();
+                Some(resp)
+            }
+            Reply::StartTransaction => {
+                if let Err(err) = self.start_transaction() {
+                    debug!(?err, "command error");
+                    Some(Resp::new_error(&err))
+                } else {
+                    Some(Resp::new_ok())
+                }
+            }
+            Reply::AddTransaction(resp) => {
+                if let Err(err) = self.add_to_transaction(resp) {
+                    debug!(?err, "command error");
+                    Some(Resp::new_error(&CommandError::TransactionError))
+                } else {
+                    Some(Resp::new_queued())
+                }
+            }
+            Reply::ExecTransaction => {
+                if self.mode != ClientMode::Transaction || self.queue.is_empty() {
+                    Some(Resp::new_error(&CommandError::TransactionError))
+                } else {
+                    self.mode = ClientMode::Normal;
+                    let resp_arr = self.exec_transaction(db);
+                    let resp = match resp_arr {
+                        Ok(resp_arr) => Resp::Array(Some(resp_arr)),
+                        Err(err) => Resp::new_error(&err),
+                    };
+                    Some(resp)
+                }
+            }
+            Reply::Blocked => None,
+        }
+    }
+    fn process_request(&mut self, db: &mut Db, frame: Resp) -> Option<Resp> {
+        let request_cmd = RequestCmd::new(frame, ClientInfo::new(self.id, self.mode));
+        let response = command::handle(db, request_cmd);
+        let resp: Option<Resp> = match response {
+            Ok(reply) => self.post_process_success_request(db, reply),
+            Err(err) => {
+                debug!(?err, "command error");
+                Some(Resp::new_error(&err))
+            }
+        };
+        resp
+    }
+
     /// Drain every complete command from inbuf, then flush replies in one write.
     fn consume(&mut self, db: &mut Db) -> Vec<Resp> {
         let mut out: Vec<Resp> = vec![];
         while let Some(request) = resp::parse_request(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
-            let response = command::handle(request.body(), db, self.id);
-            match response {
-                Ok(reply) => match reply {
-                    Reply::Now(resp) => out.push(resp),
-                    Reply::Blocked => {}
-                },
-                Err(err) => {
-                    debug!(?err, "command error");
-                    out.push(Resp::new_error(&err));
-                }
+            let out_item = self.process_request(db, request.body());
+            if let Some(item) = out_item {
+                out.push(item);
             }
         }
         out
