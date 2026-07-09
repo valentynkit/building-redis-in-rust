@@ -229,7 +229,7 @@ impl fmt::Display for Value {
 struct StreamWait {
     client_id: ClientId,
     watch: Vec<(Key, StreamId)>,
-    deadline: Duration,
+    deadline: Option<Duration>,
 }
 
 pub struct Db {
@@ -394,7 +394,10 @@ impl Db {
     // Non-blocking XREAD range check, reused for both the immediate reply and
     // re-checking a blocked client on wake — reading a stream is non-destructive,
     // so there's nothing to precompute at registration time, just re-run this.
-    pub fn xread_snapshot(&mut self, watch: &[(Key, StreamId)]) -> Result<Option<Resp>, CommandError> {
+    pub fn xread_snapshot(
+        &mut self,
+        watch: &[(Key, StreamId)],
+    ) -> Result<Option<Resp>, CommandError> {
         let mut streams: Vec<Resp> = Vec::new();
         for (key, id_start) in watch {
             let field_items: Vec<Resp> = self
@@ -423,8 +426,13 @@ impl Db {
         })
     }
 
-    pub fn xread_wait(&mut self, client_id: ClientId, watch: Vec<(Key, StreamId)>, timeout: Duration) {
-        let deadline = self.realtime_ms + timeout;
+    pub fn xread_wait(
+        &mut self,
+        client_id: ClientId,
+        watch: Vec<(Key, StreamId)>,
+        timeout: Option<Duration>,
+    ) {
+        let deadline = timeout.map(|t| self.realtime_ms + t);
         self.stream_waiters.push(StreamWait {
             client_id,
             watch,
@@ -448,12 +456,19 @@ impl Db {
                     out.insert(wait.client_id, resp);
                     return None;
                 }
-                if wait.deadline <= date_now {
-                    out.insert(wait.client_id, Resp::Array(None));
-                    return None;
+                if let Some(deadline) = wait.deadline {
+                    if deadline <= date_now {
+                        out.insert(wait.client_id, Resp::Array(None));
+                        return None;
+                    }
+
+                    // TODO: handle this better
+                    // I think the invariant is guaranteed by upper if deadline <= date_now {
+                    let remaining = deadline.checked_sub(date_now).unwrap();
+
+                    nearest_deadline =
+                        Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
                 }
-                let remaining = wait.deadline - date_now;
-                nearest_deadline = Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
                 Some(wait)
             })
             .collect();
@@ -461,11 +476,11 @@ impl Db {
         HandleWaitersResult(out, nearest_deadline)
     }
 
-    pub fn update_time(&mut self, realtime_ms: Duration) {
+    pub const fn update_time(&mut self, realtime_ms: Duration) {
         self.realtime_ms = realtime_ms;
     }
 
-    pub fn realtime_ms(&self) -> Duration {
+    pub const fn realtime_ms(&self) -> Duration {
         self.realtime_ms
     }
 
@@ -476,7 +491,11 @@ impl Db {
 
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
         let list = self.list_or_create(&key)?;
-        elems.into_iter().for_each(|e| list.push_front(e));
+
+        for e in elems {
+            list.push_front(e);
+        }
+
         let len = list.len() as i64; // ends the borrow before we touch self below
 
         if self.waiters.contains_key(&key) {

@@ -23,7 +23,14 @@ fn parse_block_prefix(args: &[Vec<u8>]) -> Result<(Option<Duration>, &[Vec<u8>])
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| CommandError::WrongNumber(String::from_utf8_lossy(ms_bytes).into_owned()))?;
 
-    Ok((Some(Duration::from_millis(ms)), &args[2..]))
+    // 0 = No timeout
+    let timeout = if ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(ms))
+    };
+
+    Ok((timeout, &args[2..]))
 }
 
 fn expect_streams_keyword(args: &[Vec<u8>]) -> Result<&[Vec<u8>], CommandError> {
@@ -35,6 +42,7 @@ fn expect_streams_keyword(args: &[Vec<u8>]) -> Result<&[Vec<u8>], CommandError> 
 
 pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdResult {
     let (block, rest) = parse_block_prefix(args)?;
+
     let elems = expect_streams_keyword(rest)?;
 
     if elems.is_empty() || !elems.len().is_multiple_of(2) {
@@ -57,14 +65,9 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
     if let Some(resp) = db.xread_snapshot(&watch)? {
         return Ok(resp.into());
     }
-
-    match block {
-        Some(timeout) => {
-            db.xread_wait(client_id, watch, timeout);
-            Ok(Reply::Blocked)
-        }
-        None => Ok(Resp::Array(None).into()),
-    }
+    // TODO:
+    db.xread_wait(client_id, watch, block);
+    Ok(Reply::Blocked)
 }
 
 pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdResult {
