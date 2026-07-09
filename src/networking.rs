@@ -10,7 +10,6 @@ use tracing::{debug, debug_span, error, info, instrument, warn};
 
 use crate::client::{Client, ClientId, Disposition};
 use crate::db::{Db, HandleWaitersResult};
-use crate::resp::Resp;
 const ADDR: &str = "127.0.0.1:6379";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
@@ -77,26 +76,13 @@ impl Server {
     // HouseKeeping
     fn before_sleep(&mut self) -> Option<Duration> {
         self.cronloops += 1;
-        // HM<ClientId, Option<(Key, Value)>> getting None for some client_id, means that it timeout, and have
-        // to receive response
-        let HandleWaitersResult(waiters, deadline) = self.db.handle_waiters();
-        for (client_id, kv) in waiters {
+        let HandleWaitersResult(list_replies, list_deadline) = self.db.handle_waiters();
+        let HandleWaitersResult(stream_replies, stream_deadline) = self.db.handle_stream_waiters();
+
+        for (client_id, resp) in list_replies.into_iter().chain(stream_replies) {
             let client_id = Token(client_id.get());
             if let Some(client) = self.clients.get_mut(&client_id) {
-                let resp = match kv {
-                    Some((key, value)) => {
-                        info!(?client_id, ?key, ?value, "writing to waiting clients");
-                        Resp::Array(Some(vec![
-                            Resp::Bulk(Some(key.into())),
-                            Resp::Bulk(Some(value.into())),
-                        ]))
-                    }
-                    None => {
-                        // TODO: Array none? or Bulk none
-                        Resp::Array(None)
-                    }
-                };
-
+                info!(?client_id, "writing to waiting client");
                 client.write_out(&resp);
 
                 if matches!(client.flush(), Disposition::Drop) {
@@ -105,7 +91,11 @@ impl Server {
                 }
             }
         }
-        deadline
+
+        match (list_deadline, stream_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
