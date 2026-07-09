@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{HandleCmdResult, parse_ttl},
+    command::common::{parse_ttl, CommandError, HandleCmdResult},
     db::{Db, Key},
     resp::{Reply, Resp},
 };
@@ -108,5 +108,32 @@ mod test {
         assert!(
             matches!(cmd_type(&mut db, b"list".as_ref()), Reply::Now(Resp::Simple(s)) if s == "list")
         );
+    }
+
+    #[test]
+    fn incr_on_missing_key_starts_at_one() {
+        let mut db = db();
+        let resp = body(incr(&mut db, b"counter".as_ref()).unwrap());
+        assert!(matches!(resp, Resp::Integer(1)));
+    }
+
+    #[test]
+    fn incr_on_numeric_key_increments() {
+        let mut db = db();
+        set(&mut db, b"counter".as_ref(), b"41".as_ref(), None, None).unwrap();
+
+        let resp = body(incr(&mut db, b"counter".as_ref()).unwrap());
+        assert!(matches!(resp, Resp::Integer(42)));
+    }
+
+    #[test]
+    fn incr_on_non_numeric_key_is_not_an_integer() {
+        let mut db = db();
+        set(&mut db, b"foo".as_ref(), b"xyz".as_ref(), None, None).unwrap();
+
+        assert!(matches!(
+            incr(&mut db, b"foo".as_ref()),
+            Err(CommandError::NotAnInteger)
+        ));
     }
 }
