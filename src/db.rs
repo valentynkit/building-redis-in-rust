@@ -34,13 +34,14 @@ impl StreamId {
         Ok(Self(ms, seq))
     }
 
-    pub fn parse_opt_seq(string: &str) -> Result<Self, CommandError> {
+    pub fn parse_opt_seq(string: &str, last: Option<Self>) -> Result<Self, CommandError> {
         if string.len() == 1 {
-            match string {
-                "-" => return Ok(Self(0, 0)),
-                "+" => return Ok(Self::MAX),
-                _ => return Err(CommandError::ParseStream(string.into())),
-            }
+            return match (string, last) {
+                ("+", _) => Ok(Self::MAX),
+                ("$", Some(other)) => Ok(other),
+                ("-", _) | ("$", None) => Ok(Self(0, 0)),
+                _ => Err(CommandError::ParseStream(string.into())),
+            };
         }
         if string.contains('-') {
             let Some((ms, seq)) = string.split_once('-') else {
