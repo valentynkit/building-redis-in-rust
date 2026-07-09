@@ -4,6 +4,7 @@ use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
 use crate::{
+    client::ClientMode,
     db::Db,
     resp::{Reply, Resp},
 };
@@ -34,6 +35,8 @@ pub enum CommandError {
     WrongType(String),
     #[error("value is not an integer or out of range")]
     NotAnInteger,
+    #[error("EXEC without MULTI")]
+    TransactionError,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
@@ -48,8 +51,30 @@ impl ExpCmd {
         str::from_utf8(value).ok()?.parse().ok()
     }
 }
-pub fn multi(_db: &mut Db) -> HandleCmdResult {
-    Ok(Resp::Simple("OK".into()).into())
+
+pub fn exec(_db: &mut Db, mode: ClientMode) -> HandleCmdResult {
+    // TODO:
+    // we should execute all the queud commands and gather their responses into Resp::Array like:
+    /*
+    > EXEC
+    1) OK
+    2) (integer) 42
+    */
+    if mode != ClientMode::Transaction {
+        return Err(CommandError::TransactionError);
+    }
+
+    Ok(Resp::Array(None).into())
+}
+
+// just returning initial request, used for Transaction processing, which doesn't execute command,
+// but just return the initial request, so the consumer could add it to queue.
+pub fn get_initial_request(elems: Vec<Vec<u8>>) -> Reply {
+    let request: Resp = elems
+        .into_iter()
+        .map(|item| Resp::Bulk(Some(item)))
+        .collect();
+    Reply::AddTransaction(request)
 }
 
 pub fn get_ttl(cmd: &ExpCmd, exp: Option<&[u8]>) -> Result<Option<Duration>, CommandError> {
