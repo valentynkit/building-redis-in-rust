@@ -138,6 +138,7 @@ fn handle_transaction_mode(kind: Command, args: Vec<Vec<u8>>) -> Result<Reply, C
         Command::Exec => Ok(Reply::ExecTransaction),
         Command::Multi => Err(CommandError::ExecTransaction),
         Command::Discard => Ok(Reply::DiscardTransaction),
+        Command::Watch => Err(CommandError::WatchTransaction),
         _ => Ok(common::get_initial_request(args)),
     }
 }
