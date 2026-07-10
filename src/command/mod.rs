@@ -2,7 +2,7 @@ pub mod common;
 mod list;
 mod stream;
 mod string;
-use crate::client::{Client, ClientId, ClientMode};
+use crate::client::{ClientId, ClientMode};
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
@@ -17,7 +17,7 @@ pub struct ClientInfo {
     mode: ClientMode,
 }
 impl ClientInfo {
-    pub fn new(id: ClientId, mode: ClientMode) -> Self {
+    pub const fn new(id: ClientId, mode: ClientMode) -> Self {
         Self { id, mode }
     }
 }
@@ -27,11 +27,8 @@ pub struct RequestCmd {
 }
 
 impl RequestCmd {
-    pub fn new(frame: Resp, client: ClientInfo) -> Self {
+    pub const fn new(frame: Resp, client: ClientInfo) -> Self {
         Self { frame, client }
-    }
-    pub fn update_frame(&mut self, frame: Resp) {
-        self.frame = frame;
     }
 }
 
@@ -55,6 +52,7 @@ pub enum Command {
     Incr,
     Multi,
     Exec,
+    Discard,
 }
 
 impl Command {
@@ -74,7 +72,7 @@ impl Command {
             Self::Xrange => 4,
             Self::Xread => -4,
             Self::Incr => 2,
-            Self::Multi | Self::Exec => 1,
+            Self::Multi | Self::Exec | Self::Discard => 1,
         }
     }
 
@@ -100,7 +98,7 @@ impl Command {
 fn handle_normal_mode(
     db: &mut Db,
     kind: Command,
-    args: Vec<Vec<u8>>,
+    args: &[Vec<u8>],
     client_id: ClientId,
 ) -> Result<Reply, CommandError> {
     match kind {
@@ -126,7 +124,8 @@ fn handle_normal_mode(
         Command::Xread => stream::xread(db, client_id, &args[1..args.len()]),
         Command::Incr => string::incr(db, &args[1]),
         Command::Multi => Ok(Reply::StartTransaction),
-        Command::Exec => Err(CommandError::TransactionError),
+        Command::Exec => Err(CommandError::ExecTransaction),
+        Command::Discard => Err(CommandError::DiscardTransaction),
     }
 }
 
@@ -134,7 +133,8 @@ fn handle_transaction_mode(kind: Command, args: Vec<Vec<u8>>) -> Result<Reply, C
     // rebuild the request
     match kind {
         Command::Exec => Ok(Reply::ExecTransaction),
-        Command::Multi => Err(CommandError::TransactionError),
+        Command::Multi => Err(CommandError::ExecTransaction),
+        Command::Discard => Ok(Reply::DiscardTransaction),
         _ => Ok(common::get_initial_request(args)),
     }
 }
@@ -154,7 +154,7 @@ pub fn handle(db: &mut Db, request: RequestCmd) -> Result<Reply, CommandError> {
     info!(command = ?kind, "handling cmd");
     let client_mode = request.client.mode;
     match client_mode {
-        ClientMode::Normal => handle_normal_mode(db, kind, args, client.id),
+        ClientMode::Normal => handle_normal_mode(db, kind, args.as_slice(), client.id),
         ClientMode::Transaction => handle_transaction_mode(kind, args),
     }
 }

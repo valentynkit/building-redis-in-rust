@@ -36,7 +36,9 @@ pub enum CommandError {
     #[error("value is not an integer or out of range")]
     NotAnInteger,
     #[error("EXEC without MULTI")]
-    TransactionError,
+    ExecTransaction,
+    #[error("DISCARD without MULTI")]
+    DiscardTransaction,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
@@ -61,7 +63,7 @@ pub fn exec(_db: &mut Db, mode: ClientMode) -> HandleCmdResult {
     2) (integer) 42
     */
     if mode != ClientMode::Transaction {
-        return Err(CommandError::TransactionError);
+        return Err(CommandError::ExecTransaction);
     }
 
     Ok(Resp::Array(None).into())
