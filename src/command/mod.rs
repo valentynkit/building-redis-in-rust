@@ -53,6 +53,7 @@ pub enum Command {
     Multi,
     Exec,
     Discard,
+    Watch,
 }
 
 impl Command {
@@ -73,6 +74,7 @@ impl Command {
             Self::Xread => -4,
             Self::Incr => 2,
             Self::Multi | Self::Exec | Self::Discard => 1,
+            Self::Watch => -2,
         }
     }
 
@@ -126,6 +128,7 @@ fn handle_normal_mode(
         Command::Multi => Ok(Reply::StartTransaction),
         Command::Exec => Err(CommandError::ExecTransaction),
         Command::Discard => Err(CommandError::DiscardTransaction),
+        Command::Watch => Ok(Resp::new_ok().into()),
     }
 }
 
