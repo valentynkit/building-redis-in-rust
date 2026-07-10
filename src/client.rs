@@ -68,6 +68,7 @@ impl Client {
             self.mode = ClientMode::Normal;
             Resp::Array(Some(vec![]))
         } else {
+            self.make_normal_mode();
             let mut out: Vec<Resp> = vec![];
             while let Some(item) = self.queue.pop_back() {
                 let resp = self.process_request(db, item);
@@ -76,7 +77,6 @@ impl Client {
                 }
             }
 
-            self.make_normal_mode();
             Resp::Array(Some(out))
         }
     }
