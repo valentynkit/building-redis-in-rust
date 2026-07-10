@@ -45,39 +45,60 @@ pub struct Client {
 }
 
 impl Client {
+    fn clear_queue(&mut self) {
+        self.queue = VecDeque::new();
+    }
     pub const fn make_normal_mode(&mut self) {
         self.mode = ClientMode::Normal;
     }
 
-    pub fn start_transaction(&mut self) -> Result<(), CommandError> {
+    pub fn start_transaction(&mut self) -> Resp {
         if self.mode == ClientMode::Transaction {
-            Err(CommandError::TransactionError)
+            Resp::new_error(&CommandError::ExecTransaction)
         } else {
             self.mode = ClientMode::Transaction;
-            Ok(())
+            Resp::new_ok()
         }
     }
 
-    pub fn exec_transaction(&mut self, db: &mut Db) -> Vec<Resp> {
-        let mut out: Vec<Resp> = vec![];
-        while let Some(item) = self.queue.pop_back() {
-            let resp = self.process_request(db, item);
-            if let Some(resp) = resp {
-                out.push(resp);
+    pub fn exec_transaction(&mut self, db: &mut Db) -> Resp {
+        if self.mode != ClientMode::Transaction {
+            Resp::new_error(&CommandError::ExecTransaction)
+        } else if self.queue.is_empty() {
+            self.mode = ClientMode::Normal;
+            Resp::Array(Some(vec![]))
+        } else {
+            let mut out: Vec<Resp> = vec![];
+            while let Some(item) = self.queue.pop_back() {
+                let resp = self.process_request(db, item);
+                if let Some(resp) = resp {
+                    out.push(resp);
+                }
             }
+
+            self.make_normal_mode();
+            Resp::Array(Some(out))
         }
-        out
     }
 
-    pub fn add_to_transaction(&mut self, resp: Resp) -> Result<(), CommandError> {
+    pub fn add_to_transaction(&mut self, resp: Resp) -> Resp {
         if self.mode == ClientMode::Transaction {
             self.queue.push_front(resp);
-            Ok(())
+            Resp::new_queued()
         } else {
-            Err(CommandError::TransactionError)
+            Resp::new_error(&CommandError::ExecTransaction)
         }
     }
 
+    pub fn discard_transaction(&mut self) -> Resp {
+        if self.mode == ClientMode::Transaction {
+            self.make_normal_mode();
+            self.clear_queue();
+            Resp::new_ok()
+        } else {
+            Resp::new_error(&CommandError::DiscardTransaction)
+        }
+    }
     pub fn new(stream: TcpStream, id: ClientId) -> Self {
         Self {
             id,
@@ -128,33 +149,10 @@ impl Client {
                 // self.make_normal_mode();
                 Some(resp)
             }
-            Reply::StartTransaction => {
-                if let Err(err) = self.start_transaction() {
-                    debug!(?err, "command error");
-                    Some(Resp::new_error(&err))
-                } else {
-                    Some(Resp::new_ok())
-                }
-            }
-            Reply::AddTransaction(resp) => {
-                if let Err(err) = self.add_to_transaction(resp) {
-                    debug!(?err, "command error");
-                    Some(Resp::new_error(&CommandError::TransactionError))
-                } else {
-                    Some(Resp::new_queued())
-                }
-            }
-            Reply::ExecTransaction => {
-                if self.mode != ClientMode::Transaction {
-                    Some(Resp::new_error(&CommandError::TransactionError))
-                } else if self.queue.is_empty() {
-                    self.mode = ClientMode::Normal;
-                    Some(Resp::Array(Some(vec![])))
-                } else {
-                    self.mode = ClientMode::Normal;
-                    Some(Resp::Array(Some(self.exec_transaction(db))))
-                }
-            }
+            Reply::StartTransaction => Some(self.start_transaction()),
+            Reply::AddTransaction(resp) => Some(self.add_to_transaction(resp)),
+            Reply::ExecTransaction => Some(self.exec_transaction(db)),
+            Reply::DiscardTransaction => Some(self.discard_transaction()),
             Reply::Blocked => None,
         }
     }

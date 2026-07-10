@@ -57,6 +57,7 @@ pub enum Reply {
     StartTransaction,
     AddTransaction(Resp),
     ExecTransaction,
+    DiscardTransaction,
     Blocked,
 }
 
