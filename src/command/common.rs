@@ -39,6 +39,8 @@ pub enum CommandError {
     ExecTransaction,
     #[error("DISCARD without MULTI")]
     DiscardTransaction,
+    #[error("WATCH inside MULTI is not allowed")]
+    WatchTransaction,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
