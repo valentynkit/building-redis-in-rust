@@ -4,8 +4,8 @@ use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
 use crate::{
-    client::ClientMode,
-    db::Db,
+    client::{ClientId, ClientMode},
+    db::{Db, Key},
     resp::{Reply, Resp},
 };
 
@@ -56,19 +56,9 @@ impl ExpCmd {
     }
 }
 
-pub fn exec(_db: &mut Db, mode: ClientMode) -> HandleCmdResult {
-    // TODO:
-    // we should execute all the queud commands and gather their responses into Resp::Array like:
-    /*
-    > EXEC
-    1) OK
-    2) (integer) 42
-    */
-    if mode != ClientMode::Transaction {
-        return Err(CommandError::ExecTransaction);
-    }
-
-    Ok(Resp::Array(None).into())
+pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> HandleCmdResult {
+    let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();
+    todo!()
 }
 
 // just returning initial request, used for Transaction processing, which doesn't execute command,
