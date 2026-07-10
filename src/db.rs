@@ -129,6 +129,7 @@ impl Object {
     }
 }
 
+use crate::client::Client;
 use crate::{client::ClientId, command::common::CommandError, resp::Resp};
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
@@ -248,13 +249,22 @@ struct StreamWait {
     watch: Vec<(Key, StreamId)>,
     deadline: Option<Duration>,
 }
-
+pub struct Watchers {
+    clients: VecDeque<Client>,
+    is_dirty: bool,
+}
+impl Watchers {
+    fn new() -> Self {
+        todo!()
+    }
+}
 pub struct Db {
     keyspace: HashMap<Key, Object>,
     expires: HashMap<Key, Duration>,
     // TODO: maybe extend VecDequeu<(ClientId, Duration) and than in server we could compare current
     // time, if timeout, we could send null or whatever response to this client.
     waiters: HashMap<Key, Waiters>,
+    watchers: HashMap<Key, Watchers>,
     outbox: Vec<Key>,
     stream_waiters: Vec<StreamWait>,
     start_ms: Instant,
@@ -270,6 +280,7 @@ impl Db {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
             waiters: HashMap::new(),
+            watchers: HashMap::new(),
             outbox: Vec::new(),
             stream_waiters: Vec::new(),
             start_ms,
@@ -527,6 +538,9 @@ impl Db {
         let list = self.as_list(&key)?;
 
         Ok(list.map_or(0, |list| list.len() as i64))
+    }
+    pub fn wait(&mut self, keys: Vec<Key>, cur_client: ClientId) -> Result<(), CommandError> {
+        todo!()
     }
 
     pub fn blpop(
