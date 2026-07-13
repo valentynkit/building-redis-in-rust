@@ -154,6 +154,7 @@ impl Server {
         if let Some(client) = self.clients.get_mut(&token)
             && matches!(client.on_readable(&mut self.db), Disposition::Drop)
         {
+            self.db.remove_watcher(ClientId::new(token.0));
             warn!("removing client");
             self.clients.remove(&token);
         }
