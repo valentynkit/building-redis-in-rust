@@ -1,4 +1,5 @@
 use core::fmt;
+use std::collections::HashSet;
 use std::ops::Bound::Included;
 use std::{
     borrow::Borrow,
@@ -249,13 +250,28 @@ struct StreamWait {
     watch: Vec<(Key, StreamId)>,
     deadline: Option<Duration>,
 }
-pub struct Watchers {
-    clients: VecDeque<Client>,
-    is_dirty: bool,
+pub struct ClientWatch {
+    keys: HashSet<Key>,
+    dirty: bool,
 }
-impl Watchers {
-    fn new() -> Self {
-        todo!()
+
+impl ClientWatch {
+    pub fn new() -> Self {
+        Self {
+            keys: HashSet::new(),
+            dirty: false,
+        }
+    }
+    pub fn add(&mut self, key: Key) {
+        self.keys.insert(key);
+    }
+
+    pub fn make_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn remove(&mut self) -> Option<HashSet<Key>> {
+        Some(mem::take(&mut self.keys))
     }
 }
 pub struct Db {
@@ -264,7 +280,9 @@ pub struct Db {
     // TODO: maybe extend VecDequeu<(ClientId, Duration) and than in server we could compare current
     // time, if timeout, we could send null or whatever response to this client.
     waiters: HashMap<Key, Waiters>,
-    watchers: HashMap<Key, Watchers>,
+    // double side structure watchers <-> clients_watchers
+    watchers: HashMap<Key, HashSet<ClientId>>,
+    clients_watchers: HashMap<ClientId, ClientWatch>,
     outbox: Vec<Key>,
     stream_waiters: Vec<StreamWait>,
     start_ms: Instant,
@@ -276,11 +294,12 @@ pub struct HandleWaitersResult(pub HashMap<ClientId, Resp>, pub Option<Duration>
 impl Db {
     pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
         debug!("db initialized");
-        Db {
+        Self {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
             waiters: HashMap::new(),
             watchers: HashMap::new(),
+            clients_watchers: HashMap::new(),
             outbox: Vec::new(),
             stream_waiters: Vec::new(),
             start_ms,
@@ -355,12 +374,48 @@ impl Db {
             _ => Err(CommandError::WrongType("stream".into())),
         }
     }
+    fn get_or_create_client_watchers(&mut self, cur_client: ClientId) -> &mut ClientWatch {
+        self.clients_watchers
+            .entry(cur_client)
+            .or_insert_with(ClientWatch::new)
+    }
+
+    pub fn add_watchers(&mut self, keys: Vec<Key>, cur_client: ClientId) {
+        for key in keys {
+            self.get_or_create_client_watchers(cur_client)
+                .keys
+                .insert(key.clone());
+            self.watchers.entry(key).or_default().insert(cur_client);
+        }
+    }
 
     pub fn key_type(&mut self, key: &Key) -> &'static str {
         if self.expire_clean(key) {
             return "none";
         }
         self.keyspace.get(key).map_or("none", Object::type_name)
+    }
+    pub fn make_dirty(&mut self, key: Key) {
+        if let Some(watchers) = self.watchers.get_mut(&key) {
+            for client in watchers.iter() {
+                if let Some(client) = self.clients_watchers.get_mut(client) {
+                    client.make_dirty();
+                }
+            }
+        }
+    }
+
+    pub fn remove_watcher(&mut self, cur_client: ClientId) {
+        if let Some(ClientWatch { keys, .. }) = self.clients_watchers.remove(&cur_client) {
+            for key in keys {
+                if let Some(watchers) = self.watchers.get_mut(&key) {
+                    watchers.remove(&cur_client);
+                    if watchers.is_empty() {
+                        self.watchers.remove(&key);
+                    }
+                }
+            }
+        }
     }
 
     // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
@@ -377,7 +432,7 @@ impl Db {
                     if is_expired {
                         out.insert(*client_id, Resp::Array(None));
                     } else {
-                        let deadline = *value - date_now;
+                        let deadline = (*value).checked_sub(date_now).unwrap();
                         nearest_deadline =
                             Some(nearest_deadline.map_or(deadline, |cur| cur.min(deadline)));
                     }

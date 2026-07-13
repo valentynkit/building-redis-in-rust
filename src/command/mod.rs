@@ -128,7 +128,7 @@ fn handle_normal_mode(
         Command::Multi => Ok(Reply::StartTransaction),
         Command::Exec => Err(CommandError::ExecTransaction),
         Command::Discard => Err(CommandError::DiscardTransaction),
-        Command::Watch => Ok(Resp::new_ok().into()),
+        Command::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
     }
 }
 

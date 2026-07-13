@@ -56,9 +56,10 @@ impl ExpCmd {
     }
 }
 
-pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> HandleCmdResult {
+pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> Reply {
     let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();
-    todo!()
+    db.add_watchers(keys, client_id);
+    Reply::Now(Resp::new_ok())
 }
 
 // just returning initial request, used for Transaction processing, which doesn't execute command,
