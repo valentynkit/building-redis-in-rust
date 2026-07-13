@@ -65,10 +65,12 @@ impl Client {
         if self.mode != ClientMode::Transaction {
             Resp::new_error(&CommandError::ExecTransaction)
         } else if self.queue.is_empty() {
-            self.mode = ClientMode::Normal;
+            self.make_normal_mode();
+            db.remove_watcher(self.id);
             Resp::Array(Some(vec![]))
         } else {
             self.make_normal_mode();
+            db.remove_watcher(self.id);
             let mut out: Vec<Resp> = vec![];
             while let Some(item) = self.queue.pop_back() {
                 let resp = self.process_request(db, item);
@@ -90,10 +92,11 @@ impl Client {
         }
     }
 
-    pub fn discard_transaction(&mut self) -> Resp {
+    pub fn discard_transaction(&mut self, db: &mut Db) -> Resp {
         if self.mode == ClientMode::Transaction {
             self.make_normal_mode();
             self.clear_queue();
+            db.remove_watcher(self.id);
             Resp::new_ok()
         } else {
             Resp::new_error(&CommandError::DiscardTransaction)
@@ -152,7 +155,7 @@ impl Client {
             Reply::StartTransaction => Some(self.start_transaction()),
             Reply::AddTransaction(resp) => Some(self.add_to_transaction(resp)),
             Reply::ExecTransaction => Some(self.exec_transaction(db)),
-            Reply::DiscardTransaction => Some(self.discard_transaction()),
+            Reply::DiscardTransaction => Some(self.discard_transaction(db)),
             Reply::Blocked => None,
         }
     }

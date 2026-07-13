@@ -469,6 +469,8 @@ impl Db {
                     fd,
                     Resp::Array(Some(vec![Resp::from(key.clone()), Resp::from(item)])),
                 );
+
+                self.make_dirty(key.clone());
             }
         }
         HandleWaitersResult(out, nearest_deadline)
@@ -568,11 +570,13 @@ impl Db {
     }
 
     pub fn remove(&mut self, key: &Key) {
+        self.make_dirty(key.clone());
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
 
     pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
+        self.make_dirty(key.clone());
         let list = self.list_or_create(&key)?;
 
         for e in elems {
@@ -604,6 +608,7 @@ impl Db {
         timeout: Option<Duration>,
         cur_client: ClientId,
     ) -> Result<Option<Value>, CommandError> {
+        self.make_dirty(key.clone());
         // TODO: could be refactored
         if let Some(list) = self.as_list_mut(&key)?
             && let Some(item) = list.pop_front()
@@ -630,6 +635,7 @@ impl Db {
     }
 
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
+        self.make_dirty(key.clone());
         let mut out: Vec<Value> = vec![];
         let Some(list) = self.as_list_mut(key)? else {
             return Ok(out);
@@ -688,6 +694,7 @@ impl Db {
     }
 
     fn set(&mut self, key: Key, value: Value) {
+        self.make_dirty(key.clone());
         self.keyspace.insert(key, Object::String(value));
     }
 
@@ -714,6 +721,7 @@ impl Db {
         id_spec: StreamIdSpec,
         elems: Vec<(Key, Value)>,
     ) -> Result<StreamId, CommandError> {
+        self.make_dirty(key.clone());
         let realtime_ms = self.realtime_ms.as_millis() as u64;
         let stream = self.stream_or_create(key)?;
         let last = stream.last_key_value().map(|(id, _)| *id);
