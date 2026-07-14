@@ -55,6 +55,16 @@ impl ExpCmd {
         str::from_utf8(value).ok()?.parse().ok()
     }
 }
+pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult {
+    let is_dirty = db.is_dirty(client_id);
+    let reply = if is_dirty {
+        Reply::DiscardTransaction
+    } else {
+        Reply::ExecTransaction
+    };
+
+    Ok(reply)
+}
 
 pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> Reply {
     let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();

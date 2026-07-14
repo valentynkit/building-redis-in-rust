@@ -132,10 +132,15 @@ fn handle_normal_mode(
     }
 }
 
-fn handle_transaction_mode(kind: Command, args: Vec<Vec<u8>>) -> Result<Reply, CommandError> {
+fn handle_transaction_mode(
+    db: &mut Db,
+    client_id: ClientId,
+    kind: Command,
+    args: Vec<Vec<u8>>,
+) -> Result<Reply, CommandError> {
     // rebuild the request
     match kind {
-        Command::Exec => Ok(Reply::ExecTransaction),
+        Command::Exec => common::execute_transaction(db, client_id),
         Command::Multi => Err(CommandError::ExecTransaction),
         Command::Discard => Ok(Reply::DiscardTransaction),
         Command::Watch => Err(CommandError::WatchTransaction),
@@ -159,7 +164,7 @@ pub fn handle(db: &mut Db, request: RequestCmd) -> Result<Reply, CommandError> {
     let client_mode = request.client.mode;
     match client_mode {
         ClientMode::Normal => handle_normal_mode(db, kind, args.as_slice(), client.id),
-        ClientMode::Transaction => handle_transaction_mode(kind, args),
+        ClientMode::Transaction => handle_transaction_mode(db, client.id, kind, args),
     }
 }
 
