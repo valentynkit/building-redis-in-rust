@@ -11,7 +11,7 @@ pub struct Cli {
 }
 
 impl Cli {
-    pub fn get_port(&self) -> u16 {
+    pub const fn get_port(&self) -> u16 {
         self.port
     }
 }
