@@ -10,7 +10,7 @@ use tracing::{debug, debug_span, error, info, instrument, warn};
 
 use crate::client::{Client, ClientId, Disposition};
 use crate::db::{Db, HandleWaitersResult};
-const ADDR: &str = "127.0.0.1:6379";
+const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
 
@@ -40,8 +40,8 @@ impl Server {
         self.next_client_id
     }
 
-    pub fn new() -> Result<Self> {
-        let mut listener = server_start().context("starting listener")?;
+    pub fn new(port: u16) -> Result<Self> {
+        let mut listener = server_start(port).context("starting listener")?;
         let poll = Poll::new().context("creating poller")?;
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)
@@ -161,8 +161,11 @@ impl Server {
     }
 }
 
-fn server_start() -> Result<TcpListener, anyhow::Error> {
-    let addr = ADDR.parse().expect("should be valide IPv4 or IPv6");
+fn server_start(port: u16) -> Result<TcpListener, anyhow::Error> {
+    let addr = format!("{ADDR}:{port}")
+        .parse()
+        .expect("should be valide IPv4 or IPv6");
+
     let listener = mio::net::TcpListener::bind(addr)?;
 
     println!(

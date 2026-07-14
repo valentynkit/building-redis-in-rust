@@ -1,12 +1,14 @@
+mod cli;
 mod client;
 mod command;
 mod db;
 mod networking;
 mod resp;
+pub use cli::Cli;
 use networking::Server;
 use tracing::info;
 
-pub fn run() -> Result<(), anyhow::Error> {
+pub fn run(cli: Cli) -> Result<(), anyhow::Error> {
     info!("Starting Server");
-    Server::new()?.run()
+    Server::new(cli.get_port())?.run()
 }
