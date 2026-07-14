@@ -2,7 +2,7 @@ use mio::net::TcpStream;
 use tracing::{debug, error, instrument, warn};
 
 use crate::command::common::CommandError;
-use crate::command::{self, ClientInfo, Command, RequestCmd};
+use crate::command::{ClientInfo, Command};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
 
