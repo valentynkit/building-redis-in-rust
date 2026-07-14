@@ -66,6 +66,11 @@ pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult 
     Ok(reply)
 }
 
+pub fn unwatch(db: &mut Db, client_id: ClientId) -> Reply {
+    db.remove_watcher(client_id);
+    Reply::Now(Resp::new_ok())
+}
+
 pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> Reply {
     let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();
     db.add_watchers(keys, client_id);

@@ -2,7 +2,7 @@ use mio::net::TcpStream;
 use tracing::{debug, error, instrument, warn};
 
 use crate::command::common::CommandError;
-use crate::command::{self, ClientInfo, RequestCmd};
+use crate::command::{self, ClientInfo, Command, RequestCmd};
 use crate::db::Db;
 use crate::resp::{self, Reply, Resp};
 
@@ -160,8 +160,8 @@ impl Client {
         }
     }
     fn process_request(&mut self, db: &mut Db, frame: Resp) -> Option<Resp> {
-        let request_cmd = RequestCmd::new(frame, ClientInfo::new(self.id, self.mode));
-        let response = command::handle(db, request_cmd);
+        let client_info = ClientInfo::new(self.id, self.mode);
+        let response = Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db));
         let resp: Option<Resp> = match response {
             Ok(reply) => self.post_process_success_request(db, reply),
             Err(err) => {
