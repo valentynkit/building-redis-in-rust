@@ -2,14 +2,15 @@ pub mod common;
 mod list;
 mod stream;
 mod string;
+use std::mem;
+
 use crate::client::{ClientId, ClientMode};
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::resp::{Reply, Resp};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::field::Empty;
-use tracing::{Span, debug, field, info, instrument};
+use tracing::{Span, debug, field, info};
 
 #[derive(Copy, Clone)]
 pub struct ClientInfo {
@@ -21,20 +22,80 @@ impl ClientInfo {
         Self { id, mode }
     }
 }
-pub struct RequestCmd {
-    frame: Resp,
+pub struct Command {
+    kind: CommandKind,
     client: ClientInfo,
+    args: Vec<Vec<u8>>,
 }
+impl Command {
+    pub fn new(frame: Resp, client: ClientInfo) -> Result<Self, CommandError> {
+        let args: Vec<Vec<u8>> = frame
+            .into_args()
+            .ok_or_else(|| CommandError::Unknown(String::new()))?;
 
-impl RequestCmd {
-    pub const fn new(frame: Resp, client: ClientInfo) -> Self {
-        Self { frame, client }
+        let kind: CommandKind = CommandKind::new(args.len(), &args[0])?;
+        Ok(Self { kind, client, args })
+    }
+
+    pub fn execute(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+        match self.client.mode {
+            ClientMode::Normal => self.handle_normal_mode(db),
+            ClientMode::Transaction => self.handle_transaction_mode(db),
+        }
+    }
+
+    fn handle_transaction_mode(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+        // rebuild the request
+        let args = mem::take(&mut self.args);
+        let client_id = self.client.id;
+        match self.kind {
+            CommandKind::Exec => common::execute_transaction(db, client_id),
+            CommandKind::Multi => Err(CommandError::ExecTransaction),
+            CommandKind::Discard => Ok(Reply::DiscardTransaction(None)),
+            CommandKind::Watch | CommandKind::Unwatch => Err(CommandError::WatchTransaction),
+            _ => Ok(common::get_initial_request(args)),
+        }
+    }
+
+    fn handle_normal_mode(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+        let args = mem::take(&mut self.args);
+        let client_id = self.client.id;
+        match self.kind {
+            CommandKind::Ping => Ok(cmd_ping()),
+            CommandKind::Echo => Ok(cmd_echo(&args[1])),
+            CommandKind::Get => string::get(db, &args[1]),
+            CommandKind::Set => string::set(
+                db,
+                &args[1],
+                &args[2],
+                args.get(3).map(Vec::as_slice),
+                args.get(4).map(Vec::as_slice),
+            ),
+            CommandKind::Lpush => list::push(db, &Side::Front, &args[1], &args[2..args.len()]),
+            CommandKind::Rpush => list::push(db, &Side::Back, &args[1], &args[2..args.len()]),
+            CommandKind::Llen => list::llen(db, &args[1]),
+            CommandKind::Lpop => list::lpop(db, &args[1], args.get(2).map(Vec::as_slice)),
+            CommandKind::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
+            CommandKind::Blpop => {
+                list::blpop(db, &args[1], args.get(2).map(Vec::as_slice), client_id)
+            }
+            CommandKind::Type => Ok(string::cmd_type(db, &args[1])),
+            CommandKind::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
+            CommandKind::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
+            CommandKind::Xread => stream::xread(db, client_id, &args[1..args.len()]),
+            CommandKind::Incr => string::incr(db, &args[1]),
+            CommandKind::Multi => Ok(Reply::StartTransaction),
+            CommandKind::Exec => Err(CommandError::ExecTransaction),
+            CommandKind::Discard => Err(CommandError::DiscardTransaction),
+            CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
+            CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
+        }
     }
 }
 
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
-pub enum Command {
+enum CommandKind {
     Ping,
     Echo,
     Set,
@@ -54,9 +115,19 @@ pub enum Command {
     Exec,
     Discard,
     Watch,
+    Unwatch,
 }
 
-impl Command {
+impl CommandKind {
+    fn new(argc: usize, value: &[u8]) -> Result<Self, CommandError> {
+        let kind: CommandKind = CommandKind::from_bytes(value)?;
+        kind.check_arity(argc)?;
+
+        Span::current().record("cmd", field::display(&kind));
+        info!(command = ?kind, "handling cmd");
+        Ok(kind)
+    }
+
     const fn arity(self) -> i32 {
         match self {
             Self::Ping => 1,
@@ -75,6 +146,7 @@ impl Command {
             Self::Incr => 2,
             Self::Multi | Self::Exec | Self::Discard => 1,
             Self::Watch => -2,
+            Self::Unwatch => 1,
         }
     }
 
@@ -95,76 +167,6 @@ impl Command {
             .ok()
             .and_then(|s| s.parse::<Self>().ok())
             .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(value).into_owned()))
-    }
-}
-fn handle_normal_mode(
-    db: &mut Db,
-    kind: Command,
-    args: &[Vec<u8>],
-    client_id: ClientId,
-) -> Result<Reply, CommandError> {
-    match kind {
-        Command::Ping => Ok(cmd_ping()),
-        Command::Echo => Ok(cmd_echo(&args[1])),
-        Command::Get => string::get(db, &args[1]),
-        Command::Set => string::set(
-            db,
-            &args[1],
-            &args[2],
-            args.get(3).map(Vec::as_slice),
-            args.get(4).map(Vec::as_slice),
-        ),
-        Command::Lpush => list::push(db, &Side::Front, &args[1], &args[2..args.len()]),
-        Command::Rpush => list::push(db, &Side::Back, &args[1], &args[2..args.len()]),
-        Command::Llen => list::llen(db, &args[1]),
-        Command::Lpop => list::lpop(db, &args[1], args.get(2).map(Vec::as_slice)),
-        Command::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
-        Command::Blpop => list::blpop(db, &args[1], args.get(2).map(Vec::as_slice), client_id),
-        Command::Type => Ok(string::cmd_type(db, &args[1])),
-        Command::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
-        Command::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
-        Command::Xread => stream::xread(db, client_id, &args[1..args.len()]),
-        Command::Incr => string::incr(db, &args[1]),
-        Command::Multi => Ok(Reply::StartTransaction),
-        Command::Exec => Err(CommandError::ExecTransaction),
-        Command::Discard => Err(CommandError::DiscardTransaction),
-        Command::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
-    }
-}
-
-fn handle_transaction_mode(
-    db: &mut Db,
-    client_id: ClientId,
-    kind: Command,
-    args: Vec<Vec<u8>>,
-) -> Result<Reply, CommandError> {
-    // rebuild the request
-    match kind {
-        Command::Exec => common::execute_transaction(db, client_id),
-        Command::Multi => Err(CommandError::ExecTransaction),
-        Command::Discard => Ok(Reply::DiscardTransaction(None)),
-        Command::Watch => Err(CommandError::WatchTransaction),
-        _ => Ok(common::get_initial_request(args)),
-    }
-}
-
-/// All command handling lives here. This is the seam that grows into a Command enum.
-#[instrument(skip(request, db), fields(cmd = Empty))]
-pub fn handle(db: &mut Db, request: RequestCmd) -> Result<Reply, CommandError> {
-    let args: Vec<Vec<u8>> = request
-        .frame
-        .into_args()
-        .ok_or_else(|| CommandError::Unknown(String::new()))?;
-
-    let kind: Command = Command::from_bytes(&args[0])?;
-    let client = request.client;
-    kind.check_arity(args.len())?;
-    Span::current().record("cmd", field::display(&kind));
-    info!(command = ?kind, "handling cmd");
-    let client_mode = request.client.mode;
-    match client_mode {
-        ClientMode::Normal => handle_normal_mode(db, kind, args.as_slice(), client.id),
-        ClientMode::Transaction => handle_transaction_mode(db, client.id, kind, args),
     }
 }
 
