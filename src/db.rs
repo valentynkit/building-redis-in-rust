@@ -406,7 +406,7 @@ impl Db {
     }
 
     pub fn is_dirty(&self, cur_client: ClientId) -> bool {
-        if let Some(client) = self.clients_watchers.get(cur_client) {
+        if let Some(client) = self.clients_watchers.get(&cur_client) {
             return client.dirty;
         }
         false
