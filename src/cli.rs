@@ -6,7 +6,7 @@ use clap::Parser;
 #[command(name = "redis", version, about, long_about = "Long about")]
 pub struct Cli {
     /// Path to the vault directory.
-    #[arg(value_parser = port_in_range, long, global = true, default_value = "6380")]
+    #[arg(value_parser = port_in_range, long, global = true, default_value = "6379")]
     port: u16,
 }
 
