@@ -58,7 +58,7 @@ impl ExpCmd {
 pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult {
     let is_dirty = db.is_dirty(client_id);
     let reply = if is_dirty {
-        Reply::DiscardTransaction
+        Reply::DiscardTransaction(Some(Resp::Array(None)))
     } else {
         Reply::ExecTransaction
     };

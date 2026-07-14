@@ -142,7 +142,7 @@ fn handle_transaction_mode(
     match kind {
         Command::Exec => common::execute_transaction(db, client_id),
         Command::Multi => Err(CommandError::ExecTransaction),
-        Command::Discard => Ok(Reply::DiscardTransaction),
+        Command::Discard => Ok(Reply::DiscardTransaction(None)),
         Command::Watch => Err(CommandError::WatchTransaction),
         _ => Ok(common::get_initial_request(args)),
     }
