@@ -405,6 +405,12 @@ impl Db {
         }
     }
 
+    pub fn is_dirty(&self, cur_client: ClientId) -> bool {
+        if let Some(client) = self.clients_watchers.get(cur_client) {
+            return client.dirty;
+        }
+        false
+    }
     pub fn remove_watcher(&mut self, cur_client: ClientId) {
         if let Some(ClientWatch { keys, .. }) = self.clients_watchers.remove(&cur_client) {
             for key in keys {
