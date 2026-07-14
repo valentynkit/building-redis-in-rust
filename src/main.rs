@@ -1,11 +1,14 @@
 use std::error::Error;
 
+use clap::Parser;
+use codecrafters_redis::Cli;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
+    let cli = Cli::parse();
     logging_init();
-    codecrafters_redis::run()?;
+    codecrafters_redis::run(cli)?;
     Ok(())
 }
 
