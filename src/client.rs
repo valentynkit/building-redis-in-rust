@@ -92,12 +92,12 @@ impl Client {
         }
     }
 
-    pub fn discard_transaction(&mut self, db: &mut Db) -> Resp {
+    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<Resp>) -> Resp {
         if self.mode == ClientMode::Transaction {
             self.make_normal_mode();
             self.clear_queue();
             db.remove_watcher(self.id);
-            Resp::new_ok()
+            resp.unwrap_or_else(Resp::new_ok)
         } else {
             Resp::new_error(&CommandError::DiscardTransaction)
         }
@@ -155,7 +155,7 @@ impl Client {
             Reply::StartTransaction => Some(self.start_transaction()),
             Reply::AddTransaction(resp) => Some(self.add_to_transaction(resp)),
             Reply::ExecTransaction => Some(self.exec_transaction(db)),
-            Reply::DiscardTransaction => Some(self.discard_transaction(db)),
+            Reply::DiscardTransaction(resp) => Some(self.discard_transaction(db, resp)),
             Reply::Blocked => None,
         }
     }
