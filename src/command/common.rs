@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::{
     client::{ClientId, ClientMode},
+    command::InfoSection,
     db::{Db, Key},
+    networking::ServerInfo,
     resp::{Reply, Resp},
 };
 
@@ -21,6 +23,8 @@ pub enum BlockMode {
 pub enum CommandError {
     #[error("unknown command '{0}'")]
     Unknown(String),
+    #[error("unknown info command '{0}'")]
+    Info(String),
     #[error("wrong number of arguments for '{0}', expected: '{1}'")]
     WrongArity(String, String),
     #[error("wrong argument format: expected number. actual '{0}'")]
@@ -64,6 +68,38 @@ pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult 
     };
 
     Ok(reply)
+}
+
+fn info_replication(info: &ServerInfo) -> String {
+    format!(
+        "# Replication\r\n\
+    role:{role}\r\n\
+    connected_slaves:{connected_slaves}\r\n\
+    master_replid:{master_replid}\r\n\
+    master_repl_offset:{master_repl_offset}\r\n\
+    second_repl_offset:-1\r\n\
+    repl_backlog_size:1048576\r\n\
+    repl_backlog_first_byte_offset:0\r\n\
+    repl_backlog_histlen:0\r\n",
+        role = info.role.as_str(),
+        connected_slaves = info.connected_slaves,
+        master_replid = info.master_replid,
+        master_repl_offset = info.master_repl_offset
+    )
+}
+
+pub fn info(
+    _client_id: ClientId,
+    section: Option<&[u8]>,
+    server_info: &ServerInfo,
+) -> HandleCmdResult {
+    let out = match section {
+        Some(value) => match InfoSection::from_bytes(value)? {
+            InfoSection::Replication => info_replication(server_info),
+        },
+        None => info_replication(server_info),
+    };
+    Ok(Reply::Now(Resp::Bulk(Some(out.into_bytes()))))
 }
 
 pub fn unwatch(db: &mut Db, client_id: ClientId) -> Reply {

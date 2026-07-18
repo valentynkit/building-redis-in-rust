@@ -2,31 +2,42 @@ pub mod common;
 mod list;
 mod stream;
 mod string;
+use std::cell::RefCell;
 use std::mem;
+use std::rc::Rc;
 
 use crate::client::{ClientId, ClientMode};
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
+use crate::networking::ServerInfo;
 use crate::resp::{Reply, Resp};
 use strum::{AsRefStr, Display, EnumString};
 use tracing::{Span, debug, field, info};
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct ClientInfo {
     id: ClientId,
     mode: ClientMode,
+    server_info: Rc<RefCell<ServerInfo>>,
 }
+
 impl ClientInfo {
-    pub const fn new(id: ClientId, mode: ClientMode) -> Self {
-        Self { id, mode }
+    pub const fn new(id: ClientId, mode: ClientMode, server_info: Rc<RefCell<ServerInfo>>) -> Self {
+        Self {
+            id,
+            mode,
+            server_info,
+        }
     }
 }
+
 pub struct Command {
     kind: CommandKind,
-    client: ClientInfo,
+    pub client: ClientInfo,
     args: Vec<Vec<u8>>,
 }
+
 impl Command {
     pub fn new(frame: Resp, client: ClientInfo) -> Result<Self, CommandError> {
         let args: Vec<Vec<u8>> = frame
@@ -48,7 +59,13 @@ impl Command {
         // rebuild the request
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
+
         match self.kind {
+            CommandKind::Info => common::info(
+                client_id,
+                args.get(1).map(Vec::as_slice),
+                &self.client.server_info.borrow(),
+            ),
             CommandKind::Exec => common::execute_transaction(db, client_id),
             CommandKind::Multi => Err(CommandError::ExecTransaction),
             CommandKind::Discard => Ok(Reply::DiscardTransaction(None)),
@@ -61,6 +78,11 @@ impl Command {
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
         match self.kind {
+            CommandKind::Info => common::info(
+                client_id,
+                args.get(1).map(Vec::as_slice),
+                &self.client.server_info.borrow(),
+            ),
             CommandKind::Ping => Ok(cmd_ping()),
             CommandKind::Echo => Ok(cmd_echo(&args[1])),
             CommandKind::Get => string::get(db, &args[1]),
@@ -93,9 +115,24 @@ impl Command {
     }
 }
 
+#[derive(EnumString, Debug, Display, Clone, Copy)]
+#[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
+enum InfoSection {
+    Replication,
+}
+
+impl InfoSection {
+    fn from_bytes(value: &[u8]) -> Result<Self, CommandError> {
+        str::from_utf8(value)
+            .ok()
+            .and_then(|s| s.parse::<Self>().ok())
+            .ok_or_else(|| CommandError::Info(String::from_utf8_lossy(value).into_owned()))
+    }
+}
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
 enum CommandKind {
+    Info,
     Ping,
     Echo,
     Set,
@@ -147,6 +184,7 @@ impl CommandKind {
             Self::Multi | Self::Exec | Self::Discard => 1,
             Self::Watch => -2,
             Self::Unwatch => 1,
+            Self::Info => -1,
         }
     }
 

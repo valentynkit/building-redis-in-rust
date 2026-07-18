@@ -4,10 +4,13 @@ use tracing::{debug, error, instrument, warn};
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
+use crate::networking::ServerInfo;
 use crate::resp::{self, Reply, Resp};
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::rc::Rc;
 
 pub const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
@@ -42,6 +45,7 @@ pub struct Client {
     queue: VecDeque<Resp>,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
+    server_info: Rc<RefCell<ServerInfo>>,
 }
 
 impl Client {
@@ -102,7 +106,7 @@ impl Client {
             Resp::new_error(&CommandError::DiscardTransaction)
         }
     }
-    pub fn new(stream: TcpStream, id: ClientId) -> Self {
+    pub fn new(stream: TcpStream, id: ClientId, server_info: Rc<RefCell<ServerInfo>>) -> Self {
         Self {
             id,
             stream,
@@ -110,8 +114,10 @@ impl Client {
             queue: VecDeque::new(),
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
+            server_info,
         }
     }
+
     /// Poller reported this client readable: read, parse, run, reply.
     pub fn on_readable(&mut self, db: &mut Db) -> Disposition {
         let mut stream = &self.stream;
@@ -160,7 +166,7 @@ impl Client {
         }
     }
     fn process_request(&mut self, db: &mut Db, frame: Resp) -> Option<Resp> {
-        let client_info = ClientInfo::new(self.id, self.mode);
+        let client_info = ClientInfo::new(self.id, self.mode, Rc::clone(&self.server_info));
         let response = Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db));
         let resp: Option<Resp> = match response {
             Ok(reply) => self.post_process_success_request(db, reply),

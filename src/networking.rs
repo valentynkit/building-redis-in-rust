@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self};
 use std::os::fd::AsRawFd;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -24,6 +26,40 @@ impl StartTime {
     }
 }
 
+pub enum ServerRole {
+    master,
+    slave,
+}
+impl ServerRole {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::master => "master",
+            Self::slave => "slave",
+        }
+    }
+}
+pub struct ServerInfo {
+    pub role: ServerRole,
+    pub connected_slaves: u32,
+    pub master_replid: String,
+    pub master_repl_offset: i64,
+}
+
+impl ServerInfo {
+    fn new(
+        role: ServerRole,
+        connected_slaves: u32,
+        master_replid: String,
+        master_repl_offset: i64,
+    ) -> Self {
+        Self {
+            role,
+            connected_slaves,
+            master_replid,
+            master_repl_offset,
+        }
+    }
+}
 pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
@@ -32,6 +68,7 @@ pub struct Server {
     db: Db,
     cronloops: u64,
     start_time: StartTime,
+    server_info: Rc<RefCell<ServerInfo>>,
 }
 
 impl Server {
@@ -54,6 +91,12 @@ impl Server {
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
         let db = Db::create(monotonic_ms, realtime_ms);
+        let server_info = Rc::new(RefCell::new(ServerInfo::new(
+            ServerRole::master,
+            0,
+            "PseudoRandom".to_owned(),
+            -1,
+        )));
 
         Ok(Self {
             listener,
@@ -63,8 +106,10 @@ impl Server {
             db,
             cronloops: 0,
             start_time,
+            server_info,
         })
     }
+
     fn set_current_time(&mut self) -> Result<()> {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let uptime = self.start_time.start_ms_mono.elapsed();
@@ -136,7 +181,8 @@ impl Server {
                     }
 
                     info!(?addr, ?c_token, "connected client");
-                    let client = Client::new(stream, ClientId::new(c_token.0));
+                    let server_info = Rc::clone(&self.server_info);
+                    let client = Client::new(stream, ClientId::new(c_token.0), server_info);
                     self.clients.insert(c_token, client);
                 }
                 Err(e) if would_block(&e) => break,
