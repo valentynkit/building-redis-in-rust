@@ -10,6 +10,7 @@ use mio::net::TcpListener;
 use mio::{Events, Interest, Poll, Token};
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
+use crate::Cli;
 use crate::client::{Client, ClientId, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 const ADDR: &str = "127.0.0.1";
@@ -77,7 +78,9 @@ impl Server {
         self.next_client_id
     }
 
-    pub fn new(port: u16) -> Result<Self> {
+    pub fn new(cli: &Cli) -> Result<Self> {
+        let replicaof = cli.parse_replicaof()?;
+        let port = cli.get_port();
         let mut listener = server_start(port).context("starting listener")?;
         let poll = Poll::new().context("creating poller")?;
         poll.registry()
@@ -91,8 +94,14 @@ impl Server {
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
         let db = Db::create(monotonic_ms, realtime_ms);
+
+        let role = match replicaof {
+            Some(_) => ServerRole::slave,
+            None => ServerRole::master,
+        };
+
         let server_info = Rc::new(RefCell::new(ServerInfo::new(
-            ServerRole::master,
+            role,
             0,
             "PseudoRandom".to_owned(),
             -1,
