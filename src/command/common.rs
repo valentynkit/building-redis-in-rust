@@ -45,6 +45,8 @@ pub enum CommandError {
     DiscardTransaction,
     #[error("WATCH inside MULTI is not allowed")]
     WatchTransaction,
+    #[error("Slave doesn't support such command")]
+    SlaveUnsupported,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]
@@ -59,7 +61,7 @@ impl ExpCmd {
         str::from_utf8(value).ok()?.parse().ok()
     }
 }
-pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult {
+pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> Reply {
     let is_dirty = db.is_dirty(client_id);
     let reply = if is_dirty {
         Reply::DiscardTransaction(Some(RespBody::Array(None)))
@@ -67,7 +69,7 @@ pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult 
         Reply::ExecTransaction
     };
 
-    Ok(reply)
+    reply
 }
 
 fn info_replication(info: &ServerInfo) -> String {

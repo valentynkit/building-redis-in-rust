@@ -73,10 +73,11 @@ impl Command {
                 args.get(1).map(Vec::as_slice),
                 &self.client.server_info.borrow(),
             ),
-            CommandKind::Exec => common::execute_transaction(db, client_id),
+            CommandKind::Exec => Ok(common::execute_transaction(db, client_id)),
             CommandKind::Multi => Err(CommandError::ExecTransaction),
             CommandKind::Discard => Ok(Reply::DiscardTransaction(None)),
             CommandKind::Watch | CommandKind::Unwatch => Err(CommandError::WatchTransaction),
+            CommandKind::Replconf => Err(CommandError::SlaveUnsupported),
             _ => Ok(common::get_initial_request(args)),
         }
     }
@@ -118,6 +119,7 @@ impl Command {
             CommandKind::Discard => Err(CommandError::DiscardTransaction),
             CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
+            CommandKind::Replconf => Ok(repl_conf()),
         }
     }
 }
@@ -160,6 +162,7 @@ enum CommandKind {
     Discard,
     Watch,
     Unwatch,
+    Replconf,
 }
 
 impl CommandKind {
@@ -192,6 +195,7 @@ impl CommandKind {
             Self::Watch => -2,
             Self::Unwatch => 1,
             Self::Info => -1,
+            Self::Replconf => -3,
         }
     }
 
@@ -215,6 +219,9 @@ impl CommandKind {
     }
 }
 
+fn repl_conf() -> Reply {
+    RespBody::new_ok().into()
+}
 fn cmd_ping() -> Reply {
     RespBody::Simple("PONG".to_owned()).into()
 }
