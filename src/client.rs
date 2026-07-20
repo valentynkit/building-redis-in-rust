@@ -5,7 +5,7 @@ use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{self, Reply, Resp};
+use crate::resp::{self, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -38,11 +38,17 @@ pub enum ClientMode {
     Transaction,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum ClientRole {
+    Normal,
+    Master,
+}
 pub struct Client {
     id: ClientId,
-    stream: TcpStream,
+    pub stream: TcpStream,
     mode: ClientMode,
-    queue: VecDeque<Resp>,
+    role: ClientRole,
+    queue: VecDeque<RespBody>,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
@@ -56,26 +62,26 @@ impl Client {
         self.mode = ClientMode::Normal;
     }
 
-    pub fn start_transaction(&mut self) -> Resp {
+    pub fn start_transaction(&mut self) -> RespBody {
         if self.mode == ClientMode::Transaction {
-            Resp::new_error(&CommandError::ExecTransaction)
+            RespBody::new_error(&CommandError::ExecTransaction)
         } else {
             self.mode = ClientMode::Transaction;
-            Resp::new_ok()
+            RespBody::new_ok()
         }
     }
 
-    pub fn exec_transaction(&mut self, db: &mut Db) -> Resp {
+    pub fn exec_transaction(&mut self, db: &mut Db) -> RespBody {
         if self.mode != ClientMode::Transaction {
-            Resp::new_error(&CommandError::ExecTransaction)
+            RespBody::new_error(&CommandError::ExecTransaction)
         } else if self.queue.is_empty() {
             self.make_normal_mode();
             db.remove_watcher(self.id);
-            Resp::Array(Some(vec![]))
+            RespBody::Array(Some(vec![]))
         } else {
             self.make_normal_mode();
             db.remove_watcher(self.id);
-            let mut out: Vec<Resp> = vec![];
+            let mut out: Vec<RespBody> = vec![];
             while let Some(item) = self.queue.pop_back() {
                 let resp = self.process_request(db, item);
                 if let Some(resp) = resp {
@@ -83,34 +89,40 @@ impl Client {
                 }
             }
 
-            Resp::Array(Some(out))
+            RespBody::Array(Some(out))
         }
     }
 
-    pub fn add_to_transaction(&mut self, resp: Resp) -> Resp {
+    pub fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
         if self.mode == ClientMode::Transaction {
             self.queue.push_front(resp);
-            Resp::new_queued()
+            RespBody::new_queued()
         } else {
-            Resp::new_error(&CommandError::ExecTransaction)
+            RespBody::new_error(&CommandError::ExecTransaction)
         }
     }
 
-    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<Resp>) -> Resp {
+    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<RespBody>) -> RespBody {
         if self.mode == ClientMode::Transaction {
             self.make_normal_mode();
             self.clear_queue();
             db.remove_watcher(self.id);
-            resp.unwrap_or_else(Resp::new_ok)
+            resp.unwrap_or_else(RespBody::new_ok)
         } else {
-            Resp::new_error(&CommandError::DiscardTransaction)
+            RespBody::new_error(&CommandError::DiscardTransaction)
         }
     }
-    pub fn new(stream: TcpStream, id: ClientId, server_info: Rc<RefCell<ServerInfo>>) -> Self {
+    pub fn new(
+        stream: TcpStream,
+        id: ClientId,
+        role: ClientRole,
+        server_info: Rc<RefCell<ServerInfo>>,
+    ) -> Self {
         Self {
             id,
             stream,
             mode: ClientMode::Normal,
+            role,
             queue: VecDeque::new(),
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
@@ -133,10 +145,18 @@ impl Client {
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
                 for resp in self.consume(db) {
-                    self.write_out(&resp);
+                    if self.role == ClientRole::Normal {
+                        self.write_out(&resp);
+                    }
                 }
 
-                self.flush()
+                if self.role == ClientRole::Normal {
+                    self.flush()
+                } else {
+                    // TODO: I think we should move the slave offset withotu replying to client, and
+                    // the ACK should be handled not by req-resp but in before sleep
+                    todo!()
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Disposition::Keep, // EINTR
@@ -147,12 +167,12 @@ impl Client {
         }
     }
 
-    pub fn write_out(&mut self, resp: &Resp) {
+    pub fn write_out(&mut self, resp: &RespBody) {
         resp.encode(&mut self.outbuf);
     }
 
     // TODO: improve this STATE machinge and state transitions
-    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Option<Resp> {
+    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Option<RespBody> {
         match reply {
             Reply::Now(resp) => {
                 // self.make_normal_mode();
@@ -165,23 +185,24 @@ impl Client {
             Reply::Blocked => None,
         }
     }
-    fn process_request(&mut self, db: &mut Db, frame: Resp) -> Option<Resp> {
-        let client_info = ClientInfo::new(self.id, self.mode, Rc::clone(&self.server_info));
+    fn process_request(&mut self, db: &mut Db, frame: RespBody) -> Option<RespBody> {
+        let client_info =
+            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
         let response = Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db));
-        let resp: Option<Resp> = match response {
+        let resp: Option<RespBody> = match response {
             Ok(reply) => self.post_process_success_request(db, reply),
             Err(err) => {
                 debug!(?err, "command error");
-                Some(Resp::new_error(&err))
+                Some(RespBody::new_error(&err))
             }
         };
         resp
     }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
-    fn consume(&mut self, db: &mut Db) -> Vec<Resp> {
-        let mut out: Vec<Resp> = vec![];
-        while let Some(request) = resp::parse_request(&self.inbuf) {
+    fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
+        let mut out: Vec<RespBody> = vec![];
+        while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
             let out_item = self.process_request(db, request.body());
             if let Some(item) = out_item {

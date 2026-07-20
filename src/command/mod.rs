@@ -6,12 +6,12 @@ use std::cell::RefCell;
 use std::mem;
 use std::rc::Rc;
 
-use crate::client::{ClientId, ClientMode};
+use crate::client::{ClientId, ClientMode, ClientRole};
 use crate::command::common::CommandError;
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{Reply, Resp};
+use crate::resp::{Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
 use tracing::{Span, debug, field, info};
 
@@ -19,14 +19,21 @@ use tracing::{Span, debug, field, info};
 pub struct ClientInfo {
     id: ClientId,
     mode: ClientMode,
+    role: ClientRole,
     server_info: Rc<RefCell<ServerInfo>>,
 }
 
 impl ClientInfo {
-    pub const fn new(id: ClientId, mode: ClientMode, server_info: Rc<RefCell<ServerInfo>>) -> Self {
+    pub const fn new(
+        id: ClientId,
+        mode: ClientMode,
+        role: ClientRole,
+        server_info: Rc<RefCell<ServerInfo>>,
+    ) -> Self {
         Self {
             id,
             mode,
+            role,
             server_info,
         }
     }
@@ -39,7 +46,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new(frame: Resp, client: ClientInfo) -> Result<Self, CommandError> {
+    pub fn new(frame: RespBody, client: ClientInfo) -> Result<Self, CommandError> {
         let args: Vec<Vec<u8>> = frame
             .into_args()
             .ok_or_else(|| CommandError::Unknown(String::new()))?;
@@ -209,9 +216,9 @@ impl CommandKind {
 }
 
 fn cmd_ping() -> Reply {
-    Resp::Simple("PONG".to_owned()).into()
+    RespBody::Simple("PONG".to_owned()).into()
 }
 
 fn cmd_echo(arg: &[u8]) -> Reply {
-    Resp::Bulk(Some(arg.into())).into()
+    RespBody::Bulk(Some(arg.into())).into()
 }

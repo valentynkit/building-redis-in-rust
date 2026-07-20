@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{self};
+use std::io::{self, BufRead};
+use std::iter;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,11 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use mio::net::TcpListener;
 use mio::{Events, Interest, Poll, Token};
+use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
-use crate::Cli;
-use crate::client::{Client, ClientId, Disposition};
+use crate::client::{Client, ClientId, ClientRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
+use crate::resp::RespBody;
+use crate::{Cli, resp};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
@@ -27,15 +30,28 @@ impl StartTime {
     }
 }
 
+#[derive(Debug, Error, Clone)]
+pub enum NetworkingError {
+    #[error("{0} - should be valid IPv4 or IPv6")]
+    NotValidAddr(String),
+    #[error("slave has invalid state")]
+    InvalidSlave,
+    #[error("master disconnected")]
+    MasterDisconnected,
+    #[error("Handshake unfinished")]
+    HandshakeUnfinished,
+}
+
+#[derive(Debug, PartialEq, PartialOrd, Ord, Eq)]
 pub enum ServerRole {
-    master,
-    slave,
+    Master,
+    Slave,
 }
 impl ServerRole {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::master => "master",
-            Self::slave => "slave",
+            Self::Master => "master",
+            Self::Slave => "slave",
         }
     }
 }
@@ -44,6 +60,7 @@ pub struct ServerInfo {
     pub connected_slaves: u32,
     pub master_replid: String,
     pub master_repl_offset: i64,
+    replica_of: Option<String>,
 }
 
 impl ServerInfo {
@@ -52,18 +69,21 @@ impl ServerInfo {
         connected_slaves: u32,
         master_replid: String,
         master_repl_offset: i64,
+        replica_of: Option<String>,
     ) -> Self {
         Self {
             role,
             connected_slaves,
             master_replid,
             master_repl_offset,
+            replica_of,
         }
     }
 }
 pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
+    master_link: Option<Client>,
     next_client_id: usize,
     poll: Poll,
     db: Db,
@@ -94,19 +114,24 @@ impl Server {
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
         let db = Db::create(monotonic_ms, realtime_ms);
+        let mut role = ServerRole::Master;
+        let mut replica_of_parsed: Option<String> = None;
 
-        let role = match replicaof {
-            Some(_) => ServerRole::slave,
-            None => ServerRole::master,
-        };
+        if let Some((host, port)) = replicaof {
+            role = ServerRole::Slave;
+            replica_of_parsed = Some(format!("{host}:{port}"));
+        }
 
+        warn!(?role, ?replica_of_parsed);
+
+        //TODO:  make optional master_replid, offset. and have it None for slaves and configured for master.
         let server_info = Rc::new(RefCell::new(ServerInfo::new(
             role,
             0,
             "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_owned(),
             0,
+            replica_of_parsed,
         )));
-
         Ok(Self {
             listener,
             clients: HashMap::new(),
@@ -116,6 +141,7 @@ impl Server {
             cronloops: 0,
             start_time,
             server_info,
+            master_link: None,
         })
     }
 
@@ -153,9 +179,60 @@ impl Server {
         }
     }
 
+    fn slave_handshake(&mut self) -> Result<(), anyhow::Error> {
+        {
+            let master_addr = {
+                let server_info = self.server_info.borrow();
+
+                if server_info.role == ServerRole::Master {
+                    return Ok(());
+                }
+
+                warn!("strarting the slave handshake");
+                let Some(master_addr) = &server_info.replica_of else {
+                    return Err(NetworkingError::InvalidSlave.into());
+                };
+
+                info!(master_addr = %master_addr, "connecting slave to master");
+                master_addr.clone()
+            };
+
+            let stream = std::net::TcpStream::connect(master_addr)?;
+            // Long lived replication link for slave -> master
+            let mut stream = mio::net::TcpStream::from_std(stream);
+
+            let c_token = Token(self.get_increased_id());
+
+            if let Err(error) =
+                self.poll
+                    .registry()
+                    .register(&mut stream, c_token, Interest::READABLE)
+            {
+                error!(?c_token, ?error, "registration failed");
+                return Err(NetworkingError::HandshakeUnfinished.into());
+            }
+
+            info!(?c_token, "connected master_client");
+            let server_info = Rc::clone(&self.server_info);
+            let client = Client::new(
+                stream,
+                ClientId::new(c_token.0),
+                ClientRole::Master,
+                server_info,
+            );
+
+            self.master_link = Some(client);
+        }
+
+        self.slave_ping()?;
+
+        Ok(())
+    }
+
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
     pub fn run(mut self) -> Result<()> {
         let mut events = Events::with_capacity(MAX_EVENTS);
+        self.slave_handshake()?;
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
@@ -191,7 +268,12 @@ impl Server {
 
                     info!(?addr, ?c_token, "connected client");
                     let server_info = Rc::clone(&self.server_info);
-                    let client = Client::new(stream, ClientId::new(c_token.0), server_info);
+                    let client = Client::new(
+                        stream,
+                        ClientId::new(c_token.0),
+                        ClientRole::Normal,
+                        server_info,
+                    );
                     self.clients.insert(c_token, client);
                 }
                 Err(e) if would_block(&e) => break,
@@ -214,12 +296,31 @@ impl Server {
             self.clients.remove(&token);
         }
     }
+
+    fn slave_ping(&mut self) -> Result<(), anyhow::Error> {
+        let Some(master_client) = &mut self.master_link else {
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        };
+
+        master_client.write_out(&iter::once("PING").collect::<RespBody>());
+        master_client.flush();
+        let mut reader = std::io::BufReader::new(&master_client.stream);
+        let mut pong = String::new();
+        reader.read_line(&mut pong)?;
+        if pong != "+PONG\r\n" {
+            error!(?pong, "master-slave: expected +PONG\r\n");
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        }
+
+        Ok(())
+    }
 }
 
 fn server_start(port: u16) -> Result<TcpListener, anyhow::Error> {
-    let addr = format!("{ADDR}:{port}")
+    let addr_str = format!("{ADDR}:{port}");
+    let addr = addr_str
         .parse()
-        .expect("should be valide IPv4 or IPv6");
+        .map_err(|_| NetworkingError::NotValidAddr(addr_str))?;
 
     let listener = mio::net::TcpListener::bind(addr)?;
 

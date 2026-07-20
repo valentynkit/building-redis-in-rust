@@ -106,9 +106,9 @@ impl From<StreamId> for String {
     }
 }
 
-impl From<StreamId> for Resp {
+impl From<StreamId> for RespBody {
     fn from(value: StreamId) -> Self {
-        Resp::Bulk(Some(value.into()))
+        RespBody::Bulk(Some(value.into()))
     }
 }
 use tracing::{debug, info};
@@ -131,7 +131,7 @@ impl Object {
 }
 
 use crate::client::Client;
-use crate::{client::ClientId, command::common::CommandError, resp::Resp};
+use crate::{client::ClientId, command::common::CommandError, resp::RespBody};
 #[derive(Eq, Default, Debug, PartialEq)]
 pub struct Value {
     value: Vec<u8>,
@@ -202,27 +202,27 @@ impl From<&Value> for Vec<u8> {
     }
 }
 
-impl From<Key> for Resp {
+impl From<Key> for RespBody {
     fn from(value: Key) -> Self {
-        Resp::Bulk(Some(value.into()))
+        RespBody::Bulk(Some(value.into()))
     }
 }
 
-impl From<&Key> for Resp {
+impl From<&Key> for RespBody {
     fn from(value: &Key) -> Self {
-        Resp::Bulk(Some(value.clone().into()))
+        RespBody::Bulk(Some(value.clone().into()))
     }
 }
 
-impl From<Value> for Resp {
+impl From<Value> for RespBody {
     fn from(value: Value) -> Self {
-        Resp::Bulk(Some(value.into()))
+        RespBody::Bulk(Some(value.into()))
     }
 }
 
-impl From<&Value> for Resp {
+impl From<&Value> for RespBody {
     fn from(value: &Value) -> Self {
-        Resp::Bulk(Some(value.into()))
+        RespBody::Bulk(Some(value.into()))
     }
 }
 impl Borrow<[u8]> for Key {
@@ -289,7 +289,7 @@ pub struct Db {
     realtime_ms: Duration,
 }
 
-pub struct HandleWaitersResult(pub HashMap<ClientId, Resp>, pub Option<Duration>);
+pub struct HandleWaitersResult(pub HashMap<ClientId, RespBody>, pub Option<Duration>);
 
 impl Db {
     pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
@@ -428,7 +428,7 @@ impl Db {
     pub fn handle_waiters(&mut self) -> HandleWaitersResult {
         let date_now = self.realtime_ms();
         let mut nearest_deadline: Option<Duration> = None;
-        let mut out: HashMap<ClientId, Resp> = HashMap::new();
+        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
         // cleanup timeout waiters
         self.waiters.retain(|_key, waiters| {
             waiters.retain(|(client_id, timeout)| {
@@ -436,7 +436,7 @@ impl Db {
                 if let Some(value) = timeout {
                     is_expired = *value <= date_now;
                     if is_expired {
-                        out.insert(*client_id, Resp::Array(None));
+                        out.insert(*client_id, RespBody::Array(None));
                     } else {
                         let deadline = (*value).checked_sub(date_now).unwrap();
                         nearest_deadline =
@@ -473,7 +473,10 @@ impl Db {
                     .expect("value is guaranteed by the is_empty check before");
                 out.insert(
                     fd,
-                    Resp::Array(Some(vec![Resp::from(key.clone()), Resp::from(item)])),
+                    RespBody::Array(Some(vec![
+                        RespBody::from(key.clone()),
+                        RespBody::from(item),
+                    ])),
                 );
 
                 self.make_dirty(key.clone());
@@ -488,24 +491,24 @@ impl Db {
     pub fn xread_snapshot(
         &mut self,
         watch: &[(Key, StreamId)],
-    ) -> Result<Option<Resp>, CommandError> {
-        let mut streams: Vec<Resp> = Vec::new();
+    ) -> Result<Option<RespBody>, CommandError> {
+        let mut streams: Vec<RespBody> = Vec::new();
         for (key, id_start) in watch {
-            let field_items: Vec<Resp> = self
+            let field_items: Vec<RespBody> = self
                 .stream_range(key, *id_start, StreamId::MAX)?
                 .into_iter()
                 .map(|(id, fields)| {
-                    let field_arr: Resp = fields
+                    let field_arr: RespBody = fields
                         .iter()
-                        .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
+                        .flat_map(|(k, v)| [RespBody::from(k), RespBody::from(v)])
                         .collect();
-                    Resp::Array(Some(vec![Resp::from(*id), field_arr]))
+                    RespBody::Array(Some(vec![RespBody::from(*id), field_arr]))
                 })
                 .collect();
 
             if !field_items.is_empty() {
-                streams.push(Resp::Array(Some(vec![
-                    Resp::from(key),
+                streams.push(RespBody::Array(Some(vec![
+                    RespBody::from(key),
                     field_items.into_iter().collect(),
                 ])));
             }
@@ -536,7 +539,7 @@ impl Db {
     // counts are small, so the simpler always-rescan approach is fine here.
     pub fn handle_stream_waiters(&mut self) -> HandleWaitersResult {
         let date_now = self.realtime_ms();
-        let mut out: HashMap<ClientId, Resp> = HashMap::new();
+        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
         let mut nearest_deadline: Option<Duration> = None;
 
         let pending = mem::take(&mut self.stream_waiters);
@@ -549,7 +552,7 @@ impl Db {
                 }
                 if let Some(deadline) = wait.deadline {
                     if deadline <= date_now {
-                        out.insert(wait.client_id, Resp::Array(None));
+                        out.insert(wait.client_id, RespBody::Array(None));
                         return None;
                     }
 
@@ -968,7 +971,7 @@ mod test {
             .unwrap();
         let HandleWaitersResult(mut delivered, _deadline) = db.handle_waiters();
         let resp = delivered.remove(&ClientId::new(1)).unwrap();
-        let Resp::Array(Some(items)) = resp else {
+        let RespBody::Array(Some(items)) = resp else {
             panic!("expected an array reply");
         };
         assert_eq!(items.len(), 2);
