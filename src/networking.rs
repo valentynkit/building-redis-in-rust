@@ -226,6 +226,7 @@ impl Server {
 
         self.slave_ping()?;
         self.slave_replconf(port)?;
+        self.slave_psync()?;
 
         Ok(())
     }
@@ -297,6 +298,29 @@ impl Server {
             self.clients.remove(&token);
         }
     }
+
+    fn slave_psync(&mut self) -> Result<(), anyhow::Error> {
+        info!("starting replconf for master-slave");
+
+        let Some(master_client) = &mut self.master_link else {
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        };
+        // 1/2
+        let resp_body = ["PSYNC", "?", "-1"].into_iter().collect::<RespBody>();
+
+        master_client.write_out(&resp_body);
+        master_client.flush();
+        let mut reader = std::io::BufReader::new(&master_client.stream);
+        let mut pong = String::new();
+        reader.read_line(&mut pong)?;
+        if pong.contains("+FULLRESYNC ") {
+            error!(?pong, "master-slave psync: expected +FULLRESYNC\r\n");
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        }
+
+        Ok(())
+    }
+
     fn slave_replconf(&mut self, port: u16) -> Result<(), anyhow::Error> {
         info!("starting replconf for master-slave");
 

@@ -77,7 +77,7 @@ impl Command {
             CommandKind::Multi => Err(CommandError::ExecTransaction),
             CommandKind::Discard => Ok(Reply::DiscardTransaction(None)),
             CommandKind::Watch | CommandKind::Unwatch => Err(CommandError::WatchTransaction),
-            CommandKind::Replconf => Err(CommandError::SlaveUnsupported),
+            CommandKind::Replconf | CommandKind::Psync => Err(CommandError::SlaveUnsupported),
             _ => Ok(common::get_initial_request(args)),
         }
     }
@@ -120,6 +120,7 @@ impl Command {
             CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
             CommandKind::Replconf => Ok(repl_conf()),
+            CommandKind::Psync => Ok(psync()),
         }
     }
 }
@@ -163,6 +164,7 @@ enum CommandKind {
     Watch,
     Unwatch,
     Replconf,
+    Psync,
 }
 
 impl CommandKind {
@@ -196,6 +198,7 @@ impl CommandKind {
             Self::Unwatch => 1,
             Self::Info => -1,
             Self::Replconf => -3,
+            Self::Psync => 3,
         }
     }
 
@@ -219,6 +222,9 @@ impl CommandKind {
     }
 }
 
+fn psync() -> Reply {
+    RespBody::Simple("FULLRESYNC <REPL_ID> 0".to_owned()).into()
+}
 fn repl_conf() -> Reply {
     RespBody::new_ok().into()
 }
