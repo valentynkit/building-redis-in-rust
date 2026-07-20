@@ -179,7 +179,7 @@ impl Server {
         }
     }
 
-    fn slave_handshake(&mut self) -> Result<(), anyhow::Error> {
+    fn slave_handshake(&mut self, port: u16) -> Result<(), anyhow::Error> {
         {
             let master_addr = {
                 let server_info = self.server_info.borrow();
@@ -225,15 +225,15 @@ impl Server {
         }
 
         self.slave_ping()?;
-        self.slave_replconf()?;
+        self.slave_replconf(port)?;
 
         Ok(())
     }
 
     #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
-    pub fn run(mut self) -> Result<()> {
+    pub fn run(mut self, port: u16) -> Result<()> {
         let mut events = Events::with_capacity(MAX_EVENTS);
-        self.slave_handshake()?;
+        self.slave_handshake(port)?;
         loop {
             let _span = debug_span!("server loop", loop = self.cronloops + 1).entered();
 
@@ -297,24 +297,14 @@ impl Server {
             self.clients.remove(&token);
         }
     }
-    fn slave_replconf(&mut self) -> Result<(), anyhow::Error> {
+    fn slave_replconf(&mut self, port: u16) -> Result<(), anyhow::Error> {
         info!("starting replconf for master-slave");
-        let server_info = self.server_info.borrow();
-        let Some(master_addr) = &server_info.replica_of else {
-            error!("replica_of empty");
-            return Err(NetworkingError::InvalidSlave.into());
-        };
-
-        let Some((_, port)) = master_addr.split_once(':') else {
-            error!(?master_addr, "couldn't get port from master_addr");
-            return Err(NetworkingError::InvalidSlave.into());
-        };
 
         let Some(master_client) = &mut self.master_link else {
             return Err(NetworkingError::HandshakeUnfinished.into());
         };
         // 1/2
-        let resp_body = ["REPLCONF", "listening-port", port]
+        let resp_body = ["REPLCONF", "listening-port", &port.to_string()]
             .into_iter()
             .collect::<RespBody>();
 

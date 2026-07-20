@@ -10,5 +10,5 @@ use tracing::info;
 
 pub fn run(cli: Cli) -> Result<(), anyhow::Error> {
     info!("Starting Server");
-    Server::new(&cli)?.run()
+    Server::new(&cli)?.run(cli.get_port())
 }
