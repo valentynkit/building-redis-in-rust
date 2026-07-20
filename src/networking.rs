@@ -60,7 +60,7 @@ pub struct ServerInfo {
     pub connected_slaves: u32,
     pub master_replid: String,
     pub master_repl_offset: i64,
-    replica_of: Option<String>,
+    pub replica_of: Option<String>,
 }
 
 impl ServerInfo {
@@ -225,6 +225,7 @@ impl Server {
         }
 
         self.slave_ping()?;
+        self.slave_replconf()?;
 
         Ok(())
     }
@@ -296,7 +297,51 @@ impl Server {
             self.clients.remove(&token);
         }
     }
+    fn slave_replconf(&mut self) -> Result<(), anyhow::Error> {
+        let server_info = self.server_info.borrow();
+        let Some(master_addr) = &server_info.replica_of else {
+            return Err(NetworkingError::InvalidSlave.into());
+        };
 
+        let Some((_, port)) = master_addr.split_once(' ') else {
+            return Err(NetworkingError::InvalidSlave.into());
+        };
+
+        let Some(master_client) = &mut self.master_link else {
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        };
+        // 1/2
+        let resp_body = ["REPLCONF", "listening-port", port]
+            .into_iter()
+            .collect::<RespBody>();
+
+        master_client.write_out(&resp_body);
+        master_client.flush();
+        let mut reader = std::io::BufReader::new(&master_client.stream);
+        let mut pong = String::new();
+        reader.read_line(&mut pong)?;
+        if pong != "+OK\r\n" {
+            error!(?pong, "master-slave repl_conf 1/2: expected +OK\r\n");
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        }
+
+        // 2/2
+        let resp_body = ["REPLCONF", "capa", "psync2"]
+            .into_iter()
+            .collect::<RespBody>();
+
+        master_client.write_out(&resp_body);
+        master_client.flush();
+        let mut reader = std::io::BufReader::new(&master_client.stream);
+        let mut pong = String::new();
+        reader.read_line(&mut pong)?;
+        if pong != "+OK\r\n" {
+            error!(?pong, "master-slave repl_conf 2/2: expected +OK\r\n");
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        }
+
+        Ok(())
+    }
     fn slave_ping(&mut self) -> Result<(), anyhow::Error> {
         let Some(master_client) = &mut self.master_link else {
             return Err(NetworkingError::HandshakeUnfinished.into());
