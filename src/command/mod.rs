@@ -120,7 +120,7 @@ impl Command {
             CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
             CommandKind::Replconf => Ok(repl_conf()),
-            CommandKind::Psync => Ok(psync()),
+            CommandKind::Psync => Ok(psync(&self.client.server_info.borrow())),
         }
     }
 }
@@ -222,8 +222,10 @@ impl CommandKind {
     }
 }
 
-fn psync() -> Reply {
-    RespBody::Simple("FULLRESYNC <REPL_ID> 0".to_owned()).into()
+fn psync(server_info: &ServerInfo) -> Reply {
+    let repl_id = server_info.master_replid.clone();
+    let out = format!("FULLRESYNC {repl_id} 0");
+    RespBody::Simple(out).into()
 }
 fn repl_conf() -> Reply {
     RespBody::new_ok().into()
