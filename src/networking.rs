@@ -311,10 +311,10 @@ impl Server {
         master_client.write_out(&resp_body);
         master_client.flush();
         let mut reader = std::io::BufReader::new(&master_client.stream);
-        let mut pong = String::new();
-        reader.read_line(&mut pong)?;
-        if pong.starts_with("+FULLRESYNC") {
-            error!(?pong, "master-slave psync: expected +FULLRESYNC\r\n");
+        let mut out = String::new();
+        reader.read_line(&mut out)?;
+        if !out.starts_with("+FULLRESYNC ") {
+            error!(?out, "master-slave psync: expected +FULLRESYNC\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
