@@ -313,7 +313,7 @@ impl Server {
         let mut reader = std::io::BufReader::new(&master_client.stream);
         let mut pong = String::new();
         reader.read_line(&mut pong)?;
-        if pong.contains("+FULLRESYNC ") {
+        if pong.starts_with("+FULLRESYNC") {
             error!(?pong, "master-slave psync: expected +FULLRESYNC\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
