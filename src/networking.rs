@@ -103,8 +103,8 @@ impl Server {
         let server_info = Rc::new(RefCell::new(ServerInfo::new(
             role,
             0,
-            "PseudoRandom".to_owned(),
-            -1,
+            "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_owned(),
+            0,
         )));
 
         Ok(Self {
