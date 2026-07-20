@@ -298,12 +298,15 @@ impl Server {
         }
     }
     fn slave_replconf(&mut self) -> Result<(), anyhow::Error> {
+        info!("starting replconf for master-slave");
         let server_info = self.server_info.borrow();
         let Some(master_addr) = &server_info.replica_of else {
+            error!("replica_of empty");
             return Err(NetworkingError::InvalidSlave.into());
         };
 
-        let Some((_, port)) = master_addr.split_once(' ') else {
+        let Some((_, port)) = master_addr.split_once(':') else {
+            error!(?master_addr, "couldn't get port from master_addr");
             return Err(NetworkingError::InvalidSlave.into());
         };
 
