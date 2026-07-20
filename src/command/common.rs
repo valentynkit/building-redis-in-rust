@@ -8,7 +8,7 @@ use crate::{
     command::InfoSection,
     db::{Db, Key},
     networking::ServerInfo,
-    resp::{Reply, Resp},
+    resp::{Reply, RespBody},
 };
 
 pub type HandleCmdResult = Result<Reply, CommandError>;
@@ -62,7 +62,7 @@ impl ExpCmd {
 pub fn execute_transaction(db: &mut Db, client_id: ClientId) -> HandleCmdResult {
     let is_dirty = db.is_dirty(client_id);
     let reply = if is_dirty {
-        Reply::DiscardTransaction(Some(Resp::Array(None)))
+        Reply::DiscardTransaction(Some(RespBody::Array(None)))
     } else {
         Reply::ExecTransaction
     };
@@ -99,26 +99,26 @@ pub fn info(
         },
         None => info_replication(server_info),
     };
-    Ok(Reply::Now(Resp::Bulk(Some(out.into_bytes()))))
+    Ok(Reply::Now(RespBody::Bulk(Some(out.into_bytes()))))
 }
 
 pub fn unwatch(db: &mut Db, client_id: ClientId) -> Reply {
     db.remove_watcher(client_id);
-    Reply::Now(Resp::new_ok())
+    Reply::Now(RespBody::new_ok())
 }
 
 pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> Reply {
     let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();
     db.add_watchers(keys, client_id);
-    Reply::Now(Resp::new_ok())
+    Reply::Now(RespBody::new_ok())
 }
 
 // just returning initial request, used for Transaction processing, which doesn't execute command,
 // but just return the initial request, so the consumer could add it to queue.
 pub fn get_initial_request(elems: Vec<Vec<u8>>) -> Reply {
-    let request: Resp = elems
+    let request: RespBody = elems
         .into_iter()
-        .map(|item| Resp::Bulk(Some(item)))
+        .map(|item| RespBody::Bulk(Some(item)))
         .collect();
     Reply::AddTransaction(request)
 }

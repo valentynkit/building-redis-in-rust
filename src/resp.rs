@@ -2,7 +2,7 @@
 
 use crate::command::common::CommandError;
 
-pub fn parse_request(buf: &[u8]) -> Option<Request> {
+pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
     if buf.first()? != &b'*' {
         return None;
     }
@@ -32,12 +32,12 @@ pub fn parse_request(buf: &[u8]) -> Option<Request> {
         output.push(part_slice.to_vec());
     }
 
-    Some(Request::new(output, cursor))
+    Some(Resp::new(output, cursor))
 }
 
 const END_OF_LINE: &[u8; 2] = b"\r\n";
 
-pub enum Resp {
+pub enum RespBody {
     Simple(String),
     Error(String),
     Integer(i64),
@@ -45,42 +45,47 @@ pub enum Resp {
     Bulk(Option<Vec<u8>>),
     Array(Option<Vec<Self>>),
 }
+impl From<&str> for RespBody {
+    fn from(value: &str) -> Self {
+        Self::Bulk(Some(value.as_bytes().to_vec()))
+    }
+}
 
-impl<T: Into<Resp>> FromIterator<T> for Resp {
+impl<T: Into<RespBody>> FromIterator<T> for RespBody {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Resp::Array(Some(iter.into_iter().map(Into::into).collect()))
+        RespBody::Array(Some(iter.into_iter().map(Into::into).collect()))
     }
 }
 
 pub enum Reply {
-    Now(Resp),
+    Now(RespBody),
     StartTransaction,
-    AddTransaction(Resp),
+    AddTransaction(RespBody),
     ExecTransaction,
-    DiscardTransaction(Option<Resp>),
+    DiscardTransaction(Option<RespBody>),
     Blocked,
 }
 
-impl From<Resp> for Reply {
-    fn from(resp: Resp) -> Self {
+impl From<RespBody> for Reply {
+    fn from(resp: RespBody) -> Self {
         Reply::Now(resp)
     }
 }
 
-pub struct Request {
-    body: Resp,
+pub struct Resp {
+    pub body: RespBody,
     consumed: usize,
 }
 
-impl Request {
+impl Resp {
     fn new(items: Vec<Vec<u8>>, consumed: usize) -> Self {
         let resp_arr = items
             .into_iter()
-            .map(|item| Resp::Bulk(Some(item)))
-            .collect::<Vec<Resp>>();
+            .map(|item| RespBody::Bulk(Some(item)))
+            .collect::<Vec<RespBody>>();
 
         Self {
-            body: Resp::Array(Some(resp_arr)),
+            body: RespBody::Array(Some(resp_arr)),
             consumed,
         }
     }
@@ -88,12 +93,12 @@ impl Request {
         self.consumed
     }
 
-    pub fn body(self) -> Resp {
+    pub fn body(self) -> RespBody {
         self.body
     }
 }
 
-impl Resp {
+impl RespBody {
     pub fn new_error(error: &CommandError) -> Self {
         Self::Error(error.to_string())
     }
@@ -132,7 +137,7 @@ impl Resp {
 }
 
 // *{v.len()}\r\n then recurse e.encode(out) per element
-fn write_arr(out: &mut Vec<u8>, items: &[Resp]) {
+fn write_arr(out: &mut Vec<u8>, items: &[RespBody]) {
     out.push(b'*');
     out.extend_from_slice(items.len().to_string().as_bytes());
     out.extend_from_slice(END_OF_LINE);
@@ -179,11 +184,11 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
-    use crate::resp::{Resp, parse_request};
+    use crate::resp::{RespBody, parse_resp};
 
     #[test]
     fn parses_array_of_bulk_strings() {
-        let req = parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
+        let req = parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n").unwrap();
         assert_eq!(req.consumed(), 23);
         assert_eq!(
             req.body().into_args().unwrap(),
@@ -194,35 +199,35 @@ mod test {
     #[test]
     fn consumed_count_allows_pipelining() {
         let buf = b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n";
-        let req = parse_request(buf).unwrap();
+        let req = parse_resp(buf).unwrap();
         assert_eq!(req.consumed(), 14); // points exactly past the first command
 
-        let second = parse_request(&buf[req.consumed()..]).unwrap();
+        let second = parse_resp(&buf[req.consumed()..]).unwrap();
         assert_eq!(second.body().into_args().unwrap(), vec![b"PING".to_vec()]);
     }
 
     #[test]
     fn rejects_non_array_input() {
-        assert!(parse_request(b"PING\r\n").is_none());
-        assert!(parse_request(b"").is_none());
+        assert!(parse_resp(b"PING\r\n").is_none());
+        assert!(parse_resp(b"").is_none());
     }
 
     #[test]
     fn incomplete_frame_is_none() {
-        assert!(parse_request(b"*1\r\n$4\r\nPIN").is_none()); // bulk body truncated
-        assert!(parse_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhe").is_none()); // second bulk truncated
-        assert!(parse_request(b"*1\r\n$4\r\nPING").is_none()); // missing trailing CRLF
+        assert!(parse_resp(b"*1\r\n$4\r\nPIN").is_none()); // bulk body truncated
+        assert!(parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhe").is_none()); // second bulk truncated
+        assert!(parse_resp(b"*1\r\n$4\r\nPING").is_none()); // missing trailing CRLF
     }
 
     #[test]
     fn into_args_rejects_non_array() {
-        assert!(Resp::Simple("PONG".into()).into_args().is_none());
+        assert!(RespBody::Simple("PONG".into()).into_args().is_none());
     }
 
     #[test]
     fn into_args_rejects_non_bulk_elements() {
         assert!(
-            Resp::Array(Some(vec![Resp::Integer(1)]))
+            RespBody::Array(Some(vec![RespBody::Integer(1)]))
                 .into_args()
                 .is_none()
         );
@@ -231,51 +236,51 @@ mod test {
     #[test]
     fn encode_simple_string() {
         let mut out = Vec::new();
-        Resp::Simple("PONG".into()).encode(&mut out);
+        RespBody::Simple("PONG".into()).encode(&mut out);
         assert_eq!(out, b"+PONG\r\n");
     }
 
     #[test]
     fn encode_error() {
         let mut out = Vec::new();
-        Resp::new_error(&CommandError::Unknown("frobnicate".into())).encode(&mut out);
+        RespBody::new_error(&CommandError::Unknown("frobnicate".into())).encode(&mut out);
         assert_eq!(out, b"-ERR unknown command 'frobnicate'\r\n");
     }
 
     #[test]
     fn encode_integer() {
         let mut out = Vec::new();
-        Resp::Integer(42).encode(&mut out);
+        RespBody::Integer(42).encode(&mut out);
         assert_eq!(out, b":42\r\n");
     }
 
     #[test]
     fn encode_bulk_string() {
         let mut out = Vec::new();
-        Resp::Bulk(Some(b"hey".to_vec())).encode(&mut out);
+        RespBody::Bulk(Some(b"hey".to_vec())).encode(&mut out);
         assert_eq!(out, b"$3\r\nhey\r\n");
     }
 
     #[test]
     fn encode_null_bulk() {
         let mut out = Vec::new();
-        Resp::Bulk(None).encode(&mut out);
+        RespBody::Bulk(None).encode(&mut out);
         assert_eq!(out, b"$-1\r\n");
     }
 
     #[test]
     fn encode_null_array() {
         let mut out = Vec::new();
-        Resp::Array(None).encode(&mut out);
+        RespBody::Array(None).encode(&mut out);
         assert_eq!(out, b"*-1\r\n");
     }
 
     #[test]
     fn encode_array_of_bulk_strings() {
         let mut out = Vec::new();
-        Resp::Array(Some(vec![
-            Resp::Bulk(Some(b"apple".to_vec())),
-            Resp::Bulk(Some(b"blueberry".to_vec())),
+        RespBody::Array(Some(vec![
+            RespBody::Bulk(Some(b"apple".to_vec())),
+            RespBody::Bulk(Some(b"blueberry".to_vec())),
         ]))
         .encode(&mut out);
         assert_eq!(out, b"*2\r\n$5\r\napple\r\n$9\r\nblueberry\r\n");

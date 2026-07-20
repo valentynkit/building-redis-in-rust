@@ -1,13 +1,13 @@
 use crate::{
     command::common::{CommandError, HandleCmdResult, parse_ttl},
     db::{Db, Key},
-    resp::{Reply, Resp},
+    resp::{Reply, RespBody},
 };
 
 pub fn get(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let opt_value = db.as_string(&key)?.map(Into::into); // None → key absent → caller writes $-1
-    Ok(Resp::Bulk(opt_value).into())
+    Ok(RespBody::Bulk(opt_value).into())
 }
 
 pub fn set(
@@ -20,15 +20,15 @@ pub fn set(
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
     db.setex(key.into(), value.into(), expiry);
-    Ok(Resp::new_ok().into())
+    Ok(RespBody::new_ok().into())
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();
     let value = db.get(&key);
 
-    let resp: Resp = value.map_or_else(
-        || Resp::Simple("none".into()),
-        |obj| Resp::Simple(obj.type_name().into()),
+    let resp: RespBody = value.map_or_else(
+        || RespBody::Simple("none".into()),
+        |obj| RespBody::Simple(obj.type_name().into()),
     );
 
     resp.into()
@@ -37,7 +37,7 @@ pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
 pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let result = db.incr(key)?;
-    Ok(Resp::Integer(result).into())
+    Ok(RespBody::Integer(result).into())
 }
 
 #[cfg(test)]
@@ -50,7 +50,7 @@ mod test {
         Db::create(Instant::now(), realtime_ms)
     }
 
-    fn body(reply: Reply) -> Resp {
+    fn body(reply: Reply) -> RespBody {
         let Reply::Now(resp) = reply else {
             panic!("expected an immediate reply");
         };
@@ -61,7 +61,7 @@ mod test {
     fn get_on_missing_key_is_null_bulk() {
         let mut db = db();
         let resp = body(get(&mut db, b"absent".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Bulk(None)));
+        assert!(matches!(resp, RespBody::Bulk(None)));
     }
 
     #[test]
@@ -70,7 +70,7 @@ mod test {
         set(&mut db, b"greeting".as_ref(), b"hello".as_ref(), None, None).unwrap();
 
         let resp = body(get(&mut db, b"greeting".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Bulk(Some(v)) if v == b"hello"));
+        assert!(matches!(resp, RespBody::Bulk(Some(v)) if v == b"hello"));
     }
 
     #[test]
@@ -88,25 +88,25 @@ mod test {
         db.update_time(db.realtime_ms() + Duration::from_secs(2));
 
         let resp = body(get(&mut db, b"greeting".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Bulk(None)));
+        assert!(matches!(resp, RespBody::Bulk(None)));
     }
 
     #[test]
     fn type_reports_none_string_and_list() {
         let mut db = db();
         assert!(
-            matches!(cmd_type(&mut db, b"absent".as_ref()), Reply::Now(Resp::Simple(s)) if s == "none")
+            matches!(cmd_type(&mut db, b"absent".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "none")
         );
 
         set(&mut db, b"str".as_ref(), b"hello".as_ref(), None, None).unwrap();
         assert!(
-            matches!(cmd_type(&mut db, b"str".as_ref()), Reply::Now(Resp::Simple(s)) if s == "string")
+            matches!(cmd_type(&mut db, b"str".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "string")
         );
 
         db.list_append(b"list".to_vec().into(), vec![b"a".to_vec().into()])
             .unwrap();
         assert!(
-            matches!(cmd_type(&mut db, b"list".as_ref()), Reply::Now(Resp::Simple(s)) if s == "list")
+            matches!(cmd_type(&mut db, b"list".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "list")
         );
     }
 
@@ -114,7 +114,7 @@ mod test {
     fn incr_on_missing_key_starts_at_one() {
         let mut db = db();
         let resp = body(incr(&mut db, b"counter".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Integer(1)));
+        assert!(matches!(resp, RespBody::Integer(1)));
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod test {
         set(&mut db, b"counter".as_ref(), b"41".as_ref(), None, None).unwrap();
 
         let resp = body(incr(&mut db, b"counter".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Integer(42)));
+        assert!(matches!(resp, RespBody::Integer(42)));
     }
 
     #[test]

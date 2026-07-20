@@ -3,11 +3,11 @@ use std::time::Duration;
 use crate::{
     client::ClientId,
     command::{
-        common::{get_ttl, ExpCmd, HandleCmdResult},
         CommandError,
+        common::{ExpCmd, HandleCmdResult, get_ttl},
     },
     db::{Db, Key, Value},
-    resp::{Reply, Resp},
+    resp::{Reply, RespBody},
 };
 
 pub enum Side {
@@ -23,7 +23,7 @@ pub fn push(db: &mut Db, side: &Side, key: &[u8], elems: &[Vec<u8>]) -> HandleCm
         Side::Back => db.list_append(key, elems)?,
     };
 
-    Ok(Resp::Integer(out).into())
+    Ok(RespBody::Integer(out).into())
 }
 
 pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> HandleCmdResult {
@@ -44,7 +44,7 @@ pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> Handle
     let resp = db
         .list_get(&key, num_from, num_to)?
         .into_iter()
-        .collect::<Resp>();
+        .collect::<RespBody>();
 
     Ok(resp.into())
 }
@@ -52,7 +52,7 @@ pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> Handle
 pub fn llen(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let out = db.list_len(key)?;
-    Ok(Resp::Integer(out).into())
+    Ok(RespBody::Integer(out).into())
 }
 
 // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
@@ -73,7 +73,7 @@ pub fn blpop(
     });
     let resp = db
         .blpop(key.clone(), timeout, client_id)?
-        .map(|item| Resp::Array(Some(vec![Resp::from(key), Resp::from(item)]))); // None → key absent → caller writes $-1
+        .map(|item| RespBody::Array(Some(vec![RespBody::from(key), RespBody::from(item)]))); // None → key absent → caller writes $-1
 
     resp.map_or(Ok(Reply::Blocked), |resp| Ok(resp.into()))
 }
@@ -97,12 +97,12 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
         .collect();
 
     let resp = if items.len() == 1 {
-        Resp::Bulk(items.pop())
+        RespBody::Bulk(items.pop())
     } else {
         items
             .into_iter()
-            .map(|item| Resp::Bulk(Some(item)))
-            .collect::<Resp>()
+            .map(|item| RespBody::Bulk(Some(item)))
+            .collect::<RespBody>()
     };
 
     Ok(resp.into())
@@ -118,7 +118,7 @@ mod test {
         Db::create(Instant::now(), realtime_ms)
     }
 
-    fn body(reply: Reply) -> Resp {
+    fn body(reply: Reply) -> RespBody {
         let Reply::Now(resp) = reply else {
             panic!("expected an immediate reply");
         };
@@ -129,7 +129,7 @@ mod test {
     fn rpush_appends_and_reports_length() {
         let mut db = db();
         let resp = body(push(&mut db, &Side::Back, b"mylist".as_ref(), &[b"a".to_vec()]).unwrap());
-        assert!(matches!(resp, Resp::Integer(1)));
+        assert!(matches!(resp, RespBody::Integer(1)));
     }
 
     #[test]
@@ -140,11 +140,11 @@ mod test {
 
         let resp =
             body(lrange(&mut db, b"mylist".as_ref(), b"0".as_ref(), b"-1".as_ref()).unwrap());
-        let Resp::Array(Some(items)) = resp else {
+        let RespBody::Array(Some(items)) = resp else {
             panic!("expected an array");
         };
-        assert!(matches!(&items[0], Resp::Bulk(Some(v)) if v == b"a"));
-        assert!(matches!(&items[1], Resp::Bulk(Some(v)) if v == b"b"));
+        assert!(matches!(&items[0], RespBody::Bulk(Some(v)) if v == b"a"));
+        assert!(matches!(&items[1], RespBody::Bulk(Some(v)) if v == b"b"));
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod test {
     #[test]
     fn llen_on_missing_key_is_zero() {
         let resp = body(llen(&mut db(), b"absent".as_ref()).unwrap());
-        assert!(matches!(resp, Resp::Integer(0)));
+        assert!(matches!(resp, RespBody::Integer(0)));
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod test {
         .unwrap();
 
         let resp = body(lpop(&mut db, b"mylist".as_ref(), None).unwrap());
-        assert!(matches!(resp, Resp::Bulk(Some(v)) if v == b"a"));
+        assert!(matches!(resp, RespBody::Bulk(Some(v)) if v == b"a"));
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod test {
         .unwrap();
 
         let resp = body(lpop(&mut db, b"mylist".as_ref(), Some(b"2".as_ref())).unwrap());
-        let Resp::Array(Some(items)) = resp else {
+        let RespBody::Array(Some(items)) = resp else {
             panic!("expected an array");
         };
         assert_eq!(items.len(), 2);

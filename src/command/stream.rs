@@ -4,7 +4,7 @@ use crate::{
     client::ClientId,
     command::common::{BlockMode, CommandError, HandleCmdResult},
     db::{Db, Key, StreamId, StreamIdSpec, Value},
-    resp::{Reply, Resp},
+    resp::{Reply, RespBody},
 };
 // Splits a leading `BLOCK <ms>` prefix off, if present. Returns the timeout
 // (if blocking) and the remaining args, still starting at `STREAMS`.
@@ -67,7 +67,7 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
         return Ok(resp.into());
     }
     let reply = match block {
-        BlockMode::NotBlocking => Reply::Now(Resp::Array(None)),
+        BlockMode::NotBlocking => Reply::Now(RespBody::Array(None)),
         BlockMode::Forever => {
             db.xread_wait(client_id, watch, None);
             Reply::Blocked
@@ -97,13 +97,13 @@ pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdRes
         .stream_range(&key, start, end)?
         .into_iter()
         .map(|(id, fields)| {
-            let field_arr: Resp = fields
+            let field_arr: RespBody = fields
                 .iter()
-                .flat_map(|(k, v)| [Resp::from(k), Resp::from(v)])
+                .flat_map(|(k, v)| [RespBody::from(k), RespBody::from(v)])
                 .collect();
-            Resp::Array(Some(vec![Resp::from(*id), field_arr]))
+            RespBody::Array(Some(vec![RespBody::from(*id), field_arr]))
         })
-        .collect::<Resp>();
+        .collect::<RespBody>();
 
     Ok(entries.into())
 }
@@ -124,5 +124,5 @@ pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdR
         ));
     }
     let id = db.stream_add(&key, id_spec, kv_arr)?;
-    Ok(Resp::from(id).into())
+    Ok(RespBody::from(id).into())
 }
