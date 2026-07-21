@@ -122,7 +122,7 @@ impl Command {
             CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
             CommandKind::Replconf => Ok(repl_conf()),
-            CommandKind::Psync => Ok(psync(&self.client.server_info.borrow())),
+            CommandKind::Psync => psync(&self.client.server_info.borrow()),
         }
     }
 }
