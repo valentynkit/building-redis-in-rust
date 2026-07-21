@@ -15,7 +15,7 @@ use crate::db::Db;
 use crate::networking::ServerInfo;
 use crate::resp::{Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{Span, debug, error, field, info, warn};
+use tracing::{debug, error, field, info, warn, Span};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -224,21 +224,32 @@ impl CommandKind {
     }
 }
 
+const EMPTY_RDB: &[u8] = include_bytes!("../../empty.rdb");
+
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
     let path = server_info.rdb_path();
     warn!(?path, "psync");
-    let file = File::open(path).map_err(|err| {
-        error!(?err, "psync couldn't open rdb");
-        CommandError::NoRdbFile
-    })?;
-    let mut buf_reader = BufReader::new(file);
-    let mut buffer: Vec<u8> = vec![];
-    buf_reader.read_to_end(&mut buffer).map_err(|err| {
-        error!(?err, "psync could read file");
-        CommandError::NoRdbFile
-    })?;
+    let buffer = match File::open(&path) {
+        Ok(file) => {
+            let mut buf_reader = BufReader::new(file);
+            let mut buffer: Vec<u8> = vec![];
+            buf_reader.read_to_end(&mut buffer).map_err(|err| {
+                error!(?err, "psync could read file");
+                CommandError::NoRdbFile
+            })?;
+            buffer
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            warn!(?path, "no rdb on disk, sending empty rdb");
+            EMPTY_RDB.to_vec()
+        }
+        Err(err) => {
+            error!(?err, "psync couldn't open rdb");
+            return Err(CommandError::NoRdbFile);
+        }
+    };
 
     let rdb = RespBody::RDB(buffer);
     Ok(Reply::Rdb(RespBody::Simple(out), rdb))
