@@ -227,13 +227,18 @@ impl CommandKind {
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
-    let file = File::open(&server_info.rdb_path).map_err(|err| {
+    let path = &server_info.rdb_path;
+    let file = File::open(path).map_err(|err| {
         error!(?err, "psync couldn't open rdb");
         CommandError::NoRdbFile
     })?;
     let mut buf_reader = BufReader::new(file);
     let mut buffer: Vec<u8> = vec![];
-    buf_reader.read_to_end(&mut buffer);
+    buf_reader.read_to_end(&mut buffer).map_err(|err| {
+        error!(?err, "psync could read file");
+        CommandError::NoRdbFile
+    })?;
+
     let rdb = RespBody::RDB(buffer);
     Ok(Reply::Rdb(RespBody::Simple(out), rdb))
 }
