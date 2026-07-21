@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::iter;
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -61,7 +62,8 @@ pub struct ServerInfo {
     pub master_replid: String,
     pub master_repl_offset: i64,
     pub replica_of: Option<String>,
-    pub rdb_path: String,
+    dir: String,
+    dbfilename: String,
 }
 
 impl ServerInfo {
@@ -71,7 +73,8 @@ impl ServerInfo {
         master_replid: String,
         master_repl_offset: i64,
         replica_of: Option<String>,
-        rdb_path: String,
+        dir: String,
+        dbfilename: String,
     ) -> Self {
         Self {
             role,
@@ -79,10 +82,15 @@ impl ServerInfo {
             master_replid,
             master_repl_offset,
             replica_of,
-            rdb_path,
+            dir,
+            dbfilename,
         }
     }
+    pub fn rdb_path(&self) -> PathBuf {
+        Path::new(&self.dir).join(&self.dbfilename)
+    }
 }
+
 pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
@@ -104,7 +112,7 @@ impl Server {
 
     pub fn new(cli: &Cli) -> Result<Self> {
         let replicaof = cli.parse_replicaof()?;
-        let port = cli.get_port();
+        let port = cli.port();
         let mut listener = server_start(port).context("starting listener")?;
         let poll = Poll::new().context("creating poller")?;
         poll.registry()
@@ -135,7 +143,8 @@ impl Server {
             "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_owned(),
             0,
             replica_of_parsed,
-            "../empty.rdb".to_owned(),
+            cli.dir().into(),
+            cli.dbfilename().into(),
         )));
         Ok(Self {
             listener,

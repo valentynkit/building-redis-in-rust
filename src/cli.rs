@@ -11,6 +11,12 @@ pub struct Cli {
     port: u16,
     #[arg(long, global = true)]
     replicaof: Option<String>,
+
+    #[arg(long, global = true, default_value = ".")]
+    dir: String,
+
+    #[arg(long, global = true, default_value = "dump.rdb")]
+    dbfilename: String,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -22,8 +28,16 @@ pub enum CliError {
 }
 
 impl Cli {
-    pub const fn get_port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
+    }
+
+    pub const fn dir(&self) -> &str {
+        self.dir.as_str()
+    }
+
+    pub const fn dbfilename(&self) -> &str {
+        self.dbfilename.as_str()
     }
 
     pub fn parse_replicaof(&self) -> Result<Option<(String, u16)>, CliError> {

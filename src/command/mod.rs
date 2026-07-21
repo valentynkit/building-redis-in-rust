@@ -227,7 +227,7 @@ impl CommandKind {
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
-    let path = &server_info.rdb_path;
+    let path = server_info.rdb_path();
     warn!(?path, "psync");
     let file = File::open(path).map_err(|err| {
         error!(?err, "psync couldn't open rdb");
