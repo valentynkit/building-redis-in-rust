@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{CommandError, HandleCmdResult, parse_ttl},
+    command::common::{parse_ttl, CommandError, HandleCmdResult},
     db::{Db, Key},
     resp::{Reply, RespBody},
 };
