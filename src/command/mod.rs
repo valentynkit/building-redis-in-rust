@@ -15,7 +15,7 @@ use crate::db::Db;
 use crate::networking::ServerInfo;
 use crate::resp::{Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{Span, debug, error, field, info};
+use tracing::{Span, debug, error, field, info, warn};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -228,6 +228,7 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
     let path = &server_info.rdb_path;
+    warn!(?path, "psync");
     let file = File::open(path).map_err(|err| {
         error!(?err, "psync couldn't open rdb");
         CommandError::NoRdbFile
