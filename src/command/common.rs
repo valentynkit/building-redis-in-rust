@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Error;
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
@@ -47,6 +48,8 @@ pub enum CommandError {
     WatchTransaction,
     #[error("Slave doesn't support such command")]
     SlaveUnsupported,
+    #[error("Rdb file doesn't exist")]
+    NoRdbFile,
 }
 
 #[derive(AsRefStr, Debug, EnumString)]

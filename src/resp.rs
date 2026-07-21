@@ -39,6 +39,7 @@ const END_OF_LINE: &[u8; 2] = b"\r\n";
 
 pub enum RespBody {
     Simple(String),
+    RDB(Vec<u8>),
     Error(String),
     Integer(i64),
     // TODO: consider migrating to Bytes/BytesMut instead of u8
@@ -59,6 +60,7 @@ impl<T: Into<RespBody>> FromIterator<T> for RespBody {
 
 pub enum Reply {
     Now(RespBody),
+    Rdb(RespBody, RespBody),
     StartTransaction,
     AddTransaction(RespBody),
     ExecTransaction,
@@ -112,6 +114,7 @@ impl RespBody {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Simple(s) => write_simple_string(out, s),
+            Self::RDB(bytes) => write_rdb(out, bytes),
             Self::Error(s) => write_simple_error(out, s),
             Self::Integer(num) => write_int(out, *num),
             Self::Bulk(None) => write_null_bulk(out),
@@ -165,6 +168,13 @@ fn write_simple_error(out: &mut Vec<u8>, msg: &str) {
     out.extend_from_slice(b"-ERR ");
     out.extend_from_slice(msg.as_bytes());
     out.extend_from_slice(END_OF_LINE);
+}
+
+fn write_rdb(out: &mut Vec<u8>, data: &[u8]) {
+    out.push(b'$');
+    out.extend_from_slice(data.len().to_string().as_bytes());
+    out.extend_from_slice(END_OF_LINE);
+    out.extend_from_slice(data);
 }
 
 fn write_simple_string(out: &mut Vec<u8>, s: &str) {

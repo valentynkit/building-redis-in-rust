@@ -83,8 +83,17 @@ impl Client {
             db.remove_watcher(self.id);
             let mut out: Vec<RespBody> = vec![];
             while let Some(item) = self.queue.pop_back() {
-                let resp = self.process_request(db, item);
-                if let Some(resp) = resp {
+                let reply = self.process_request(db, item);
+
+                let resp_arr: Vec<RespBody> = match reply {
+                    Ok(reply) => self.post_process_success_request(db, reply),
+                    Err(err) => {
+                        debug!(?err, "command error");
+                        vec![RespBody::new_error(&err)]
+                    }
+                };
+
+                for resp in resp_arr {
                     out.push(resp);
                 }
             }
@@ -144,11 +153,7 @@ impl Client {
             // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
-                for resp in self.consume(db) {
-                    if self.role == ClientRole::Normal {
-                        self.write_out(&resp);
-                    }
-                }
+                self.consume(db);
 
                 if self.role == ClientRole::Normal {
                     self.flush()
@@ -172,44 +177,56 @@ impl Client {
     }
 
     // TODO: improve this STATE machinge and state transitions
-    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Option<RespBody> {
+    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Vec<RespBody> {
+        let mut out = vec![];
         match reply {
             Reply::Now(resp) => {
                 // self.make_normal_mode();
-                Some(resp)
+                out.push(resp);
             }
-            Reply::StartTransaction => Some(self.start_transaction()),
-            Reply::AddTransaction(resp) => Some(self.add_to_transaction(resp)),
-            Reply::ExecTransaction => Some(self.exec_transaction(db)),
-            Reply::DiscardTransaction(resp) => Some(self.discard_transaction(db, resp)),
-            Reply::Blocked => None,
-        }
-    }
-    fn process_request(&mut self, db: &mut Db, frame: RespBody) -> Option<RespBody> {
-        let client_info =
-            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
-        let response = Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db));
-        let resp: Option<RespBody> = match response {
-            Ok(reply) => self.post_process_success_request(db, reply),
-            Err(err) => {
-                debug!(?err, "command error");
-                Some(RespBody::new_error(&err))
-            }
-        };
-        resp
-    }
-
-    /// Drain every complete command from inbuf, then flush replies in one write.
-    fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
-        let mut out: Vec<RespBody> = vec![];
-        while let Some(request) = resp::parse_resp(&self.inbuf) {
-            self.inbuf.drain(..request.consumed());
-            let out_item = self.process_request(db, request.body());
-            if let Some(item) = out_item {
-                out.push(item);
+            Reply::StartTransaction => out.push(self.start_transaction()),
+            Reply::AddTransaction(resp) => out.push(self.add_to_transaction(resp)),
+            Reply::ExecTransaction => out.push(self.exec_transaction(db)),
+            Reply::DiscardTransaction(resp) => out.push(self.discard_transaction(db, resp)),
+            Reply::Blocked => {}
+            Reply::Rdb(sync, rdb) => {
+                // TODO: probably we have to create new slave here, for one way streaming into it slaves.
+                out.push(sync);
+                out.push(rdb);
             }
         }
         out
+    }
+    fn process_request(&mut self, db: &mut Db, frame: RespBody) -> Result<Reply, CommandError> {
+        let client_info =
+            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
+        Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db))
+    }
+
+    /// Drain every complete command from inbuf, then flush replies in one write.
+    fn consume(&mut self, db: &mut Db) {
+        while let Some(request) = resp::parse_resp(&self.inbuf) {
+            self.inbuf.drain(..request.consumed());
+            let reply = self.process_request(db, request.body());
+
+            let resp_arr: Vec<RespBody> = match reply {
+                Ok(reply) => self.post_process_success_request(db, reply),
+                Err(err) => {
+                    debug!(?err, "command error");
+                    vec![RespBody::new_error(&err)]
+                }
+            };
+            for resp in resp_arr {
+                if self.role == ClientRole::Normal {
+                    self.write_out(&resp);
+                } else {
+                    //  slave role
+                    // TODO: I think we should move the slave offset withotu replying to client, and
+                    // the ACK should be handled not by req-resp but in before sleep
+                    todo!()
+                }
+            }
+        }
     }
 
     #[instrument(skip(self))]
