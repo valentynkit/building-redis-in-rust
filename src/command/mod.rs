@@ -3,17 +3,19 @@ mod list;
 mod stream;
 mod string;
 use std::cell::RefCell;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::mem;
 use std::rc::Rc;
 
 use crate::client::{ClientId, ClientMode, ClientRole};
-use crate::command::common::CommandError;
+use crate::command::common::{CommandError, HandleCmdResult};
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::networking::ServerInfo;
 use crate::resp::{Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{Span, debug, field, info};
+use tracing::{Span, debug, error, field, info};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -169,7 +171,7 @@ enum CommandKind {
 
 impl CommandKind {
     fn new(argc: usize, value: &[u8]) -> Result<Self, CommandError> {
-        let kind: CommandKind = CommandKind::from_bytes(value)?;
+        let kind = Self::from_bytes(value)?;
         kind.check_arity(argc)?;
 
         Span::current().record("cmd", field::display(&kind));
@@ -222,11 +224,20 @@ impl CommandKind {
     }
 }
 
-fn psync(server_info: &ServerInfo) -> Reply {
+fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
-    RespBody::Simple(out).into()
+    let file = File::open(&server_info.rdb_path).map_err(|err| {
+        error!(?err, "psync couldn't open rdb");
+        CommandError::NoRdbFile
+    })?;
+    let mut buf_reader = BufReader::new(file);
+    let mut buffer: Vec<u8> = vec![];
+    buf_reader.read_to_end(&mut buffer);
+    let rdb = RespBody::RDB(buffer);
+    Ok(Reply::Rdb(RespBody::Simple(out), rdb))
 }
+
 fn repl_conf() -> Reply {
     RespBody::new_ok().into()
 }

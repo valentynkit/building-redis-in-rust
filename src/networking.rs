@@ -61,6 +61,7 @@ pub struct ServerInfo {
     pub master_replid: String,
     pub master_repl_offset: i64,
     pub replica_of: Option<String>,
+    pub rdb_path: String,
 }
 
 impl ServerInfo {
@@ -70,6 +71,7 @@ impl ServerInfo {
         master_replid: String,
         master_repl_offset: i64,
         replica_of: Option<String>,
+        rdb_path: String,
     ) -> Self {
         Self {
             role,
@@ -77,12 +79,14 @@ impl ServerInfo {
             master_replid,
             master_repl_offset,
             replica_of,
+            rdb_path,
         }
     }
 }
 pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
+    slaves: Vec<Client>,
     master_link: Option<Client>,
     next_client_id: usize,
     poll: Poll,
@@ -131,10 +135,12 @@ impl Server {
             "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_owned(),
             0,
             replica_of_parsed,
+            "../empty.rdb".to_owned(),
         )));
         Ok(Self {
             listener,
             clients: HashMap::new(),
+            slaves: vec![],
             next_client_id: 0,
             poll,
             db,
