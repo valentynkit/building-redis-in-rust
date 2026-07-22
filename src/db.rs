@@ -104,7 +104,9 @@ impl Db {
             realtime_ms,
         }
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // String ops
     // ---------------------------------------------------------------
@@ -122,7 +124,7 @@ impl Db {
     }
 
     fn set(&mut self, key: Key, value: Value) {
-        self.make_dirty(key.clone());
+        self.make_dirty(&key);
         self.keyspace.insert(key, Object::String(value));
     }
 
@@ -144,7 +146,9 @@ impl Db {
         self.set(key, new_value);
         Ok(out)
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // List ops
     // ---------------------------------------------------------------
@@ -220,7 +224,7 @@ impl Db {
     }
 
     pub fn list_prepend(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
-        self.make_dirty(key.clone());
+        self.make_dirty(&key);
         let list = self.list_or_create(&key)?;
 
         for e in elems {
@@ -238,7 +242,7 @@ impl Db {
     }
 
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
-        self.make_dirty(key.clone());
+        self.make_dirty(&key);
         let list = self.list_or_create(&key)?;
         list.extend(elems);
         let len = list.len() as i64; // ends the borrow before we touch self below
@@ -251,7 +255,7 @@ impl Db {
     }
 
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
-        self.make_dirty(key.clone());
+        self.make_dirty(key);
         let mut out: Vec<Value> = vec![];
         let Some(list) = self.as_list_mut(key)? else {
             return Ok(out);
@@ -272,7 +276,7 @@ impl Db {
         timeout: Option<Duration>,
         client_id: ClientId,
     ) -> Result<Option<Value>, CommandError> {
-        self.make_dirty(key.clone());
+        self.make_dirty(&key);
         // TODO: could be refactored
         if let Some(list) = self.as_list_mut(&key)?
             && let Some(item) = list.pop_front()
@@ -286,7 +290,9 @@ impl Db {
         waiters.push_back((client_id, deadline));
         Ok(None)
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Stream ops
     // ---------------------------------------------------------------
@@ -331,7 +337,7 @@ impl Db {
         id_spec: StreamIdSpec,
         elems: Vec<(Key, Value)>,
     ) -> Result<StreamId, CommandError> {
-        self.make_dirty(key.clone());
+        self.make_dirty(key);
         let realtime_ms = self.realtime_ms.as_millis() as u64;
         let stream = self.stream_or_create(key)?;
         let last = stream.last_key_value().map(|(id, _)| *id);
@@ -410,7 +416,11 @@ impl Db {
         positions: Vec<(Key, StreamId)>,
         timeout: Option<Duration>,
     ) {
-        debug!(?client_id, num_keys = positions.len(), "registering stream waiter");
+        debug!(
+            ?client_id,
+            num_keys = positions.len(),
+            "registering stream waiter"
+        );
         let deadline = timeout.map(|t| self.realtime_ms + t);
         self.stream_waiters.push(StreamWait {
             client_id,
@@ -418,7 +428,9 @@ impl Db {
             deadline,
         });
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Watcher ops (WATCH / MULTI dirty-tracking)
     // ---------------------------------------------------------------
@@ -431,13 +443,14 @@ impl Db {
 
     pub fn add_watchers(&mut self, keys: Vec<Key>, client_id: ClientId) {
         for key in keys {
-            self.get_or_create_client_watchers(client_id).add(key.clone());
+            self.get_or_create_client_watchers(client_id)
+                .add(key.clone());
             self.key_watchers.entry(key).or_default().insert(client_id);
         }
     }
 
-    pub fn make_dirty(&mut self, key: Key) {
-        if let Some(watchers) = self.key_watchers.get_mut(&key) {
+    pub fn make_dirty(&mut self, key: &Key) {
+        if let Some(watchers) = self.key_watchers.get_mut(key) {
             for client in watchers.iter() {
                 if let Some(client) = self.client_watches.get_mut(client) {
                     client.make_dirty();
@@ -466,7 +479,9 @@ impl Db {
             }
         }
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Waiter housekeeping — called once per event-loop tick
     // ---------------------------------------------------------------
@@ -485,7 +500,9 @@ impl Db {
                     if is_expired {
                         out.insert(*client_id, RespBody::Array(None));
                     } else {
-                        let deadline = (*value).checked_sub(date_now).unwrap();
+                        let deadline = (*value).checked_sub(date_now).expect(
+                            "value > date_now: is_expired (= value <= date_now) was false to reach this branch, so the subtraction can't underflow",
+                        );
                         nearest_deadline =
                             Some(nearest_deadline.map_or(deadline, |cur| cur.min(deadline)));
                     }
@@ -512,12 +529,12 @@ impl Db {
                 if waiters.is_empty() {
                     break;
                 }
-                let (client_id, _timeout) = waiters
-                    .pop_front()
-                    .expect("queue is guaranteed by the is_empty check before");
-                let item = list
-                    .pop_front()
-                    .expect("value is guaranteed by the is_empty check before");
+                let (client_id, _timeout) = waiters.pop_front().expect(
+                    "waiters non-empty: just checked via waiters.is_empty() above, and nothing between that check and this pop touches waiters",
+                );
+                let item = list.pop_front().expect(
+                    "list non-empty: checked via list.is_empty() above; only waiters is touched in between, list is untouched until this pop",
+                );
                 out.insert(
                     client_id,
                     RespBody::Array(Some(vec![
@@ -526,7 +543,7 @@ impl Db {
                     ])),
                 );
 
-                self.make_dirty(key.clone());
+                self.make_dirty(key);
             }
         }
         HandleWaitersResult {
@@ -557,9 +574,11 @@ impl Db {
                         return None;
                     }
 
-                    // TODO: handle this better
-                    // I think the invariant is guaranteed by upper if deadline <= date_now {
-                    let remaining = deadline.checked_sub(date_now).unwrap();
+                    // deadline > date_now: the `if deadline <= date_now` branch above
+                    // returns early, so reaching here already rules out underflow.
+                    let remaining = deadline.checked_sub(date_now).expect(
+                        "deadline > date_now: the early return above handles deadline <= date_now",
+                    );
 
                     nearest_deadline =
                         Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
@@ -573,7 +592,9 @@ impl Db {
             deadline: nearest_deadline,
         }
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Clock
     // ---------------------------------------------------------------
@@ -585,7 +606,9 @@ impl Db {
     pub const fn realtime_ms(&self) -> Duration {
         self.realtime_ms
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Lifecycle / generic
     // ---------------------------------------------------------------
@@ -598,11 +621,13 @@ impl Db {
     }
 
     pub fn remove(&mut self, key: &Key) {
-        self.make_dirty(key.clone());
+        self.make_dirty(key);
         self.keyspace.remove(key);
         self.expires.remove(key);
     }
+}
 
+impl Db {
     // ---------------------------------------------------------------
     // Private helpers used across more than one family above
     // ---------------------------------------------------------------
