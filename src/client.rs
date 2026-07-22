@@ -5,7 +5,7 @@ use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{self, Reply, RespBody};
+use crate::resp::{self, Propagate, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -17,6 +17,7 @@ pub const READ_BUF: usize = 512;
 pub enum Disposition {
     Keep,
     Drop,
+    PromoteToSlave,
 }
 
 #[derive(Eq, Hash, Debug, PartialEq, Copy, Clone)]
@@ -42,7 +43,9 @@ pub enum ClientMode {
 pub enum ClientRole {
     Normal,
     Master,
+    Slave,
 }
+
 pub struct Client {
     id: ClientId,
     pub stream: TcpStream,
@@ -52,12 +55,22 @@ pub struct Client {
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
+    // this field is used ONLY on master which has finished handshake with slave, to propogate the
+    // need for creating a copy of this client or moving it?
 }
 
 impl Client {
     fn clear_queue(&mut self) {
         self.queue = VecDeque::new();
     }
+    pub const fn role(&self) -> ClientRole {
+        self.role
+    }
+
+    pub fn promote_to_slave(&mut self) {
+        self.role = ClientRole::Slave;
+    }
+
     pub const fn make_normal_mode(&mut self) {
         self.mode = ClientMode::Normal;
     }
@@ -86,7 +99,7 @@ impl Client {
                 let reply = self.process_request(db, item);
 
                 let resp_arr: Vec<RespBody> = match reply {
-                    Ok(reply) => self.post_process_success_request(db, reply),
+                    Ok((reply, _)) => self.post_process_success_request(db, reply),
                     Err(err) => {
                         debug!(?err, "command error");
                         vec![RespBody::new_error(&err)]
@@ -121,6 +134,7 @@ impl Client {
             RespBody::new_error(&CommandError::DiscardTransaction)
         }
     }
+
     pub fn new(
         stream: TcpStream,
         id: ClientId,
@@ -140,11 +154,11 @@ impl Client {
     }
 
     /// Poller reported this client readable: read, parse, run, reply.
-    pub fn on_readable(&mut self, db: &mut Db) -> Disposition {
+    pub fn on_readable(&mut self, db: &mut Db) -> (Disposition, Vec<RespBody>) {
         let mut stream = &self.stream;
         let mut buf = [0u8; READ_BUF];
-
-        match stream.read(&mut buf) {
+        let mut to_propogate: Vec<RespBody> = vec![];
+        let disposition = match stream.read(&mut buf) {
             // EOF: peer closed cleanly
             Ok(0) => {
                 warn!("client disconnected");
@@ -153,14 +167,17 @@ impl Client {
             // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
-                self.consume(db);
+                to_propogate.extend(self.consume(db));
 
-                if self.role == ClientRole::Normal {
-                    self.flush()
-                } else {
-                    // TODO: I think we should move the slave offset withotu replying to client, and
-                    // the ACK should be handled not by req-resp but in before sleep
-                    todo!()
+                match self.role {
+                    ClientRole::Normal => self.flush(),
+                    ClientRole::Master => {
+                        // TODO: I think we should move the slave offset withotu replying to client, and
+                        // the ACK should be handled not by req-resp but in before sleep
+                        // todo!()
+                        Disposition::Keep
+                    }
+                    ClientRole::Slave => Disposition::PromoteToSlave,
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
@@ -169,7 +186,9 @@ impl Client {
                 warn!(?e, "read failed");
                 Disposition::Drop
             }
-        }
+        };
+
+        (disposition, to_propogate)
     }
 
     pub fn write_out(&mut self, resp: &RespBody) {
@@ -180,7 +199,7 @@ impl Client {
     fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Vec<RespBody> {
         let mut out = vec![];
         match reply {
-            Reply::Now(resp) => {
+            Reply::Now(resp, _) => {
                 // self.make_normal_mode();
                 out.push(resp);
             }
@@ -190,27 +209,40 @@ impl Client {
             Reply::DiscardTransaction(resp) => out.push(self.discard_transaction(db, resp)),
             Reply::Blocked => {}
             Reply::Rdb(sync, rdb) => {
-                // TODO: probably we have to create new slave here, for one way streaming into it slaves.
+                self.promote_to_slave();
                 out.push(sync);
                 out.push(rdb);
             }
         }
         out
     }
-    fn process_request(&mut self, db: &mut Db, frame: RespBody) -> Result<Reply, CommandError> {
+    fn process_request(
+        &mut self,
+        db: &mut Db,
+        frame: RespBody,
+    ) -> Result<(Reply, Option<RespBody>), CommandError> {
         let client_info =
             ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
         Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db))
     }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
-    fn consume(&mut self, db: &mut Db) {
+    /// returns requset to replicate to slaves
+    fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
+        let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
-            let reply = self.process_request(db, request.body());
+            let req_body = request.body();
+            let reply = self.process_request(db, req_body);
 
             let resp_arr: Vec<RespBody> = match reply {
-                Ok(reply) => self.post_process_success_request(db, reply),
+                Ok((reply, forward)) => {
+                    if let Some(forward) = forward {
+                        out.push(forward);
+                    }
+
+                    self.post_process_success_request(db, reply)
+                }
                 Err(err) => {
                     debug!(?err, "command error");
                     vec![RespBody::new_error(&err)]
@@ -227,6 +259,7 @@ impl Client {
                 }
             }
         }
+        out
     }
 
     #[instrument(skip(self))]

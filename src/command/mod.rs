@@ -13,9 +13,9 @@ use crate::command::common::{CommandError, HandleCmdResult};
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{Reply, RespBody};
+use crate::resp::{Propagate, Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{debug, error, field, info, warn, Span};
+use tracing::{Span, debug, error, field, info, warn};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -57,19 +57,22 @@ impl Command {
         Ok(Self { kind, client, args })
     }
 
-    pub fn execute(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+    pub fn execute(&mut self, db: &mut Db) -> Result<(Reply, Option<RespBody>), CommandError> {
         match self.client.mode {
             ClientMode::Normal => self.handle_normal_mode(db),
             ClientMode::Transaction => self.handle_transaction_mode(db),
         }
     }
 
-    fn handle_transaction_mode(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+    fn handle_transaction_mode(
+        &mut self,
+        db: &mut Db,
+    ) -> Result<(Reply, Option<RespBody>), CommandError> {
         // rebuild the request
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
 
-        match self.kind {
+        let reply = match self.kind {
             CommandKind::Info => common::info(
                 client_id,
                 args.get(1).map(Vec::as_slice),
@@ -81,13 +84,18 @@ impl Command {
             CommandKind::Watch | CommandKind::Unwatch => Err(CommandError::WatchTransaction),
             CommandKind::Replconf | CommandKind::Psync => Err(CommandError::SlaveUnsupported),
             _ => Ok(common::get_initial_request(args)),
-        }
+        }?;
+
+        Ok((reply, None))
     }
 
-    fn handle_normal_mode(&mut self, db: &mut Db) -> Result<Reply, CommandError> {
+    fn handle_normal_mode(
+        &mut self,
+        db: &mut Db,
+    ) -> Result<(Reply, Option<RespBody>), CommandError> {
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
-        match self.kind {
+        let reply = match self.kind {
             CommandKind::Info => common::info(
                 client_id,
                 args.get(1).map(Vec::as_slice),
@@ -123,7 +131,14 @@ impl Command {
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
             CommandKind::Replconf => Ok(repl_conf()),
             CommandKind::Psync => psync(&self.client.server_info.borrow()),
-        }
+        }?;
+
+        let forward = match &reply {
+            Reply::Now(_, Propagate::Replicate) => Some(args.iter().cloned().collect::<RespBody>()),
+            _ => None,
+        };
+
+        Ok((reply, forward))
     }
 }
 
@@ -256,12 +271,12 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
 }
 
 fn repl_conf() -> Reply {
-    RespBody::new_ok().into()
+    Reply::readonly(RespBody::new_ok())
 }
 fn cmd_ping() -> Reply {
-    RespBody::Simple("PONG".to_owned()).into()
+    Reply::readonly(RespBody::Simple("PONG".to_owned()))
 }
 
 fn cmd_echo(arg: &[u8]) -> Reply {
-    RespBody::Bulk(Some(arg.into())).into()
+    Reply::readonly(RespBody::Bulk(Some(arg.into())))
 }

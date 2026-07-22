@@ -104,18 +104,18 @@ pub fn info(
         },
         None => info_replication(server_info),
     };
-    Ok(Reply::Now(RespBody::Bulk(Some(out.into_bytes()))))
+    Ok(Reply::readonly(RespBody::Bulk(Some(out.into_bytes()))))
 }
 
 pub fn unwatch(db: &mut Db, client_id: ClientId) -> Reply {
     db.remove_watcher(client_id);
-    Reply::Now(RespBody::new_ok())
+    Reply::readonly(RespBody::new_ok())
 }
 
 pub fn watch_keys(db: &mut Db, client_id: ClientId, keys: &[Vec<u8>]) -> Reply {
     let keys: Vec<Key> = keys.iter().map(|k| k.as_slice().into()).collect();
     db.add_watchers(keys, client_id);
-    Reply::Now(RespBody::new_ok())
+    Reply::readonly(RespBody::new_ok())
 }
 
 // just returning initial request, used for Transaction processing, which doesn't execute command,
