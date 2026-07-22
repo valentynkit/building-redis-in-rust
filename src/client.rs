@@ -177,7 +177,13 @@ impl Client {
                         // todo!()
                         Disposition::Keep
                     }
-                    ClientRole::Slave => Disposition::PromoteToSlave,
+                    ClientRole::Slave => {
+                        if matches!(self.flush(), Disposition::Drop) {
+                            Disposition::Drop
+                        } else {
+                            Disposition::PromoteToSlave
+                        }
+                    }
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Disposition::Keep, // nothing yet
@@ -209,6 +215,7 @@ impl Client {
             Reply::DiscardTransaction(resp) => out.push(self.discard_transaction(db, resp)),
             Reply::Blocked => {}
             Reply::Rdb(sync, rdb) => {
+                warn!("rdb finished handshake on master side");
                 self.promote_to_slave();
                 out.push(sync);
                 out.push(rdb);
@@ -250,8 +257,7 @@ impl Client {
             };
             for resp in resp_arr {
                 match self.role {
-                    ClientRole::Normal => self.write_out(&resp),
-                    ClientRole::Slave => warn!("slave"),
+                    ClientRole::Normal | ClientRole::Slave => self.write_out(&resp),
                     ClientRole::Master => {
                         // TODO: I think we should move the slave offset withotu replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
