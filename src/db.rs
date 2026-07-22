@@ -255,7 +255,6 @@ impl Db {
     }
 
     pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
-        self.make_dirty(key);
         let mut out: Vec<Value> = vec![];
         let Some(list) = self.as_list_mut(key)? else {
             return Ok(out);
@@ -267,6 +266,11 @@ impl Db {
                 out.push(item);
             }
         }
+        // Only a real pop should invalidate a WATCH on this key — an absent
+        // or already-empty list leaves nothing changed.
+        if !out.is_empty() {
+            self.make_dirty(key);
+        }
         Ok(out)
     }
 
@@ -276,11 +280,14 @@ impl Db {
         timeout: Option<Duration>,
         client_id: ClientId,
     ) -> Result<Option<Value>, CommandError> {
-        self.make_dirty(&key);
         // TODO: could be refactored
         if let Some(list) = self.as_list_mut(&key)?
             && let Some(item) = list.pop_front()
         {
+            // Only the immediate-pop path is a real write; registering a
+            // waiter below is a read that hasn't found anything yet, and
+            // must not invalidate a WATCH on this key.
+            self.make_dirty(&key);
             return Ok(Some(item));
         }
 
@@ -737,6 +744,44 @@ mod test {
     }
 
     #[test]
+    fn list_pop_on_absent_key_does_not_dirty_a_watched_key() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"absent".to_vec().into();
+        let watcher = ClientId::new(1);
+        db.add_watchers(vec![key.clone()], watcher);
+
+        assert!(db.list_pop(&key, 1).unwrap().is_empty());
+        assert!(!db.is_dirty(watcher));
+    }
+
+    #[test]
+    fn list_pop_that_actually_pops_dirties_a_watched_key() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        let watcher = ClientId::new(1);
+        db.add_watchers(vec![key.clone()], watcher);
+
+        assert_eq!(db.list_pop(&key, 1).unwrap().len(), 1);
+        assert!(db.is_dirty(watcher));
+    }
+
+    #[test]
+    fn blpop_registering_a_waiter_does_not_dirty_a_watched_key() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        let watcher = ClientId::new(1);
+        db.add_watchers(vec![key.clone()], watcher);
+
+        assert!(db.blpop(key, None, ClientId::new(2)).unwrap().is_none());
+        assert!(!db.is_dirty(watcher));
+    }
+
+    #[test]
     fn blpop_returns_immediately_when_list_has_items() {
         use crate::client::ClientId;
         let mut db = db();
@@ -746,6 +791,20 @@ mod test {
 
         let got = db.blpop(key, None, ClientId::new(1)).unwrap().unwrap();
         assert_eq!(Vec::<u8>::from(got), b"a".to_vec());
+    }
+
+    #[test]
+    fn blpop_that_pops_immediately_dirties_a_watched_key() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        let watcher = ClientId::new(1);
+        db.add_watchers(vec![key.clone()], watcher);
+
+        assert!(db.blpop(key, None, ClientId::new(2)).unwrap().is_some());
+        assert!(db.is_dirty(watcher));
     }
 
     #[test]
