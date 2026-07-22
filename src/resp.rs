@@ -15,6 +15,10 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
     let parse_number = |inner_buf: &[u8]| str::from_utf8(inner_buf).ok()?.parse().ok();
     let validate_part_end = |inner_buf: &[u8]| inner_buf == [b'\r', b'\n'];
     let mut cursor = get_part_end_position(&buf[1..])? + 1;
+    if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+        trace!(cursor, "malformed resp frame: array header missing CRLF");
+        return None;
+    }
     let n_elems: usize = parse_number(&buf[1..cursor])?;
     let mut output: Vec<Vec<u8>> = vec![];
     for _ in 0..n_elems {
@@ -22,10 +26,18 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
         // "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
         cursor = num_start + get_part_end_position(&buf[num_start + 1..])? + 1;
         let part_size = parse_number(&buf[num_start..cursor])?;
+        if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+            trace!(cursor, "malformed resp frame: bulk header missing CRLF");
+            return None;
+        }
         cursor += 2;
 
-        let part_slice = buf.get(cursor..cursor + part_size)?;
-        cursor += part_size;
+        // checked: part_size comes straight from client-supplied digits, with
+        // no upper bound — an unchecked add here would overflow on a huge
+        // declared length (panic in debug builds, silent wraparound in release).
+        let data_end = cursor.checked_add(part_size)?;
+        let part_slice = buf.get(cursor..data_end)?;
+        cursor = data_end;
 
         let part_end = buf.get(cursor..cursor + 2)?;
         if !validate_part_end(part_end) {
@@ -250,6 +262,27 @@ mod test {
         assert!(parse_resp(b"*1\r\n$4\r\nPIN").is_none()); // bulk body truncated
         assert!(parse_resp(b"*2\r\n$4\r\nECHO\r\n$3\r\nhe").is_none()); // second bulk truncated
         assert!(parse_resp(b"*1\r\n$4\r\nPING").is_none()); // missing trailing CRLF
+    }
+
+    #[test]
+    fn rejects_malformed_array_header() {
+        // "\r" not followed by "\n" right after the declared element count.
+        assert!(parse_resp(b"*1\rX$4\r\nPING\r\n").is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_bulk_header() {
+        // "\r" not followed by "\n" right after a bulk string's declared length.
+        assert!(parse_resp(b"*1\r\n$4\rXPING\r\n").is_none());
+    }
+
+    #[test]
+    fn rejects_declared_length_that_would_overflow_cursor() {
+        // A declared bulk length near usize::MAX must be rejected cleanly via
+        // checked_add, not panic (debug builds) or silently wrap (release).
+        let huge = usize::MAX.to_string();
+        let buf = format!("*1\r\n${huge}\r\nx\r\n").into_bytes();
+        assert!(parse_resp(&buf).is_none());
     }
 
     #[test]
