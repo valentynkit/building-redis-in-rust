@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::{
     client::ClientId,
     command::{
+        common::{get_ttl, ExpCmd, HandleCmdResult},
         CommandError,
-        common::{ExpCmd, HandleCmdResult, get_ttl},
     },
     db::{Db, Key, Value},
     resp::{Reply, RespBody},
@@ -119,7 +119,7 @@ mod test {
     }
 
     fn body(reply: Reply) -> RespBody {
-        let Reply::Now(resp) = reply else {
+        let Reply::Now(resp, _) = reply else {
             panic!("expected an immediate reply");
         };
         resp
@@ -203,7 +203,7 @@ mod test {
         push(&mut db, &Side::Back, b"mylist".as_ref(), &[b"a".to_vec()]).unwrap();
 
         let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1)).unwrap();
-        assert!(matches!(reply, Reply::Now(_)));
+        assert!(matches!(reply, Reply::Now(_, _)));
     }
 
     #[test]

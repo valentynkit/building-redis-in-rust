@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{CommandError, HandleCmdResult, parse_ttl},
+    command::common::{parse_ttl, CommandError, HandleCmdResult},
     db::{Db, Key},
     resp::{Reply, RespBody},
 };
@@ -51,7 +51,7 @@ mod test {
     }
 
     fn body(reply: Reply) -> RespBody {
-        let Reply::Now(resp) = reply else {
+        let Reply::Now(resp, _) = reply else {
             panic!("expected an immediate reply");
         };
         resp
@@ -95,18 +95,18 @@ mod test {
     fn type_reports_none_string_and_list() {
         let mut db = db();
         assert!(
-            matches!(cmd_type(&mut db, b"absent".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "none")
+            matches!(cmd_type(&mut db, b"absent".as_ref()), Reply::Now(RespBody::Simple(s), _) if s == "none")
         );
 
         set(&mut db, b"str".as_ref(), b"hello".as_ref(), None, None).unwrap();
         assert!(
-            matches!(cmd_type(&mut db, b"str".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "string")
+            matches!(cmd_type(&mut db, b"str".as_ref()), Reply::Now(RespBody::Simple(s), _) if s == "string")
         );
 
         db.list_append(b"list".to_vec().into(), vec![b"a".to_vec().into()])
             .unwrap();
         assert!(
-            matches!(cmd_type(&mut db, b"list".as_ref()), Reply::Now(RespBody::Simple(s)) if s == "list")
+            matches!(cmd_type(&mut db, b"list".as_ref()), Reply::Now(RespBody::Simple(s), _) if s == "list")
         );
     }
 

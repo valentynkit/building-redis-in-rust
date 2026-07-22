@@ -628,6 +628,7 @@ impl Db {
     }
 
     pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
+        self.make_dirty(key.clone());
         let list = self.list_or_create(&key)?;
         list.extend(elems);
         let len = list.len() as i64; // ends the borrow before we touch self below
@@ -773,7 +774,12 @@ impl Db {
     pub fn incr(&mut self, key: Key) -> Result<i64, CommandError> {
         let value = self.as_string(&key)?;
         let new_value = match value {
-            Some(value) => Value::from_int(value.as_int()? + 1),
+            Some(value) => Value::from_int(
+                value
+                    .as_int()?
+                    .checked_add(1)
+                    .ok_or(CommandError::IntOverflow)?,
+            ),
             None => Value::from_int(1),
         };
         let out = new_value.as_int()?;
