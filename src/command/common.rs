@@ -24,6 +24,8 @@ pub enum BlockMode {
 pub enum CommandError {
     #[error("unknown command '{0}'")]
     Unknown(String),
+    #[error("increment or decrement would overflow")]
+    IntOverflow,
     #[error("unknown info command '{0}'")]
     Info(String),
     #[error("wrong number of arguments for '{0}', expected: '{1}'")]

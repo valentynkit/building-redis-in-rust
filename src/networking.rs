@@ -67,7 +67,7 @@ pub struct ServerInfo {
 }
 
 impl ServerInfo {
-    fn new(
+    pub(crate) fn new(
         role: ServerRole,
         connected_slaves: u32,
         master_replid: String,
@@ -309,13 +309,23 @@ impl Server {
         if let Some(client) = self.clients.get_mut(&token) {
             let (disposition, to_propogate) = client.on_readable(&mut self.db);
             if matches!(disposition, Disposition::Drop) {
+                let client_role = client.role();
+
                 self.db.remove_watcher(ClientId::new(token.0));
                 warn!("removing client");
                 self.clients.remove(&token);
-                self.slaves.remove(&token);
+
+                if client_role == ClientRole::Slave && self.slaves.contains(&token) {
+                    self.slaves.remove(&token);
+
+                    let mut server_info = self.server_info.borrow_mut();
+                    server_info.connected_slaves -= 1;
+                }
                 return;
             }
             if client.role() == ClientRole::Slave && !self.slaves.contains(&token) {
+                let mut server_info = self.server_info.borrow_mut();
+                server_info.connected_slaves += 1;
                 self.slaves.insert(token);
             }
 
@@ -341,9 +351,8 @@ impl Server {
 
         master_client.write_out(&resp_body);
         master_client.flush();
-        let mut reader = std::io::BufReader::new(&master_client.stream);
-        let mut out = String::new();
-        reader.read_line(&mut out)?;
+        let out = master_client.read_line()?;
+
         if !out.starts_with("+FULLRESYNC ") {
             error!(?out, "master-slave psync: expected +FULLRESYNC\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
@@ -365,11 +374,10 @@ impl Server {
 
         master_client.write_out(&resp_body);
         master_client.flush();
-        let mut reader = std::io::BufReader::new(&master_client.stream);
-        let mut pong = String::new();
-        reader.read_line(&mut pong)?;
-        if pong != "+OK\r\n" {
-            error!(?pong, "master-slave repl_conf 1/2: expected +OK\r\n");
+
+        let out = master_client.read_line()?;
+        if out != "+OK\r\n" {
+            error!(?out, "master-slave repl_conf 1/2: expected +OK\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
@@ -380,11 +388,9 @@ impl Server {
 
         master_client.write_out(&resp_body);
         master_client.flush();
-        let mut reader = std::io::BufReader::new(&master_client.stream);
-        let mut pong = String::new();
-        reader.read_line(&mut pong)?;
-        if pong != "+OK\r\n" {
-            error!(?pong, "master-slave repl_conf 2/2: expected +OK\r\n");
+        let out = master_client.read_line()?;
+        if out != "+OK\r\n" {
+            error!(?out, "master-slave repl_conf 2/2: expected +OK\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
@@ -397,11 +403,9 @@ impl Server {
 
         master_client.write_out(&iter::once("PING").collect::<RespBody>());
         master_client.flush();
-        let mut reader = std::io::BufReader::new(&master_client.stream);
-        let mut pong = String::new();
-        reader.read_line(&mut pong)?;
-        if pong != "+PONG\r\n" {
-            error!(?pong, "master-slave: expected +PONG\r\n");
+        let out = master_client.read_line()?;
+        if out != "+PONG\r\n" {
+            error!(?out, "master-slave: expected +PONG\r\n");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 

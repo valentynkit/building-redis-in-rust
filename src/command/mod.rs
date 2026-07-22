@@ -53,6 +53,9 @@ impl Command {
             .into_args()
             .ok_or_else(|| CommandError::Unknown(String::new()))?;
 
+        if args.is_empty() {
+            return Err(CommandError::Unknown(String::new()));
+        }
         let kind: CommandKind = CommandKind::new(args.len(), &args[0])?;
         Ok(Self { kind, client, args })
     }
@@ -197,7 +200,7 @@ impl CommandKind {
     const fn arity(self) -> i32 {
         match self {
             Self::Ping => 1,
-            Self::Echo => -1,
+            Self::Echo => 2,
             Self::Set => -3,
             Self::Get => 2,
             Self::Rpush | Self::Lpush => -3,

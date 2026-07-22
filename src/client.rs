@@ -9,7 +9,7 @@ use crate::resp::{self, Propagate, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 
 pub const READ_BUF: usize = 512;
@@ -46,9 +46,16 @@ pub enum ClientRole {
     Slave,
 }
 
+/// What processing one `Reply` produced: the bodies to send back to this
+/// client, and any write commands from it that need to reach slaves.
+struct ReplyOutcome {
+    replies: Vec<RespBody>,
+    forwards: Vec<RespBody>,
+}
+
 pub struct Client {
     id: ClientId,
-    pub stream: TcpStream,
+    stream: TcpStream,
     mode: ClientMode,
     role: ClientRole,
     queue: VecDeque<RespBody>,
@@ -60,6 +67,13 @@ pub struct Client {
 }
 
 impl Client {
+    pub(crate) fn read_line(&mut self) -> io::Result<String> {
+        let mut reader = io::BufReader::new(&self.stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        Ok(line)
+    }
+
     fn clear_queue(&mut self) {
         self.queue = VecDeque::new();
     }
@@ -84,22 +98,31 @@ impl Client {
         }
     }
 
-    pub fn exec_transaction(&mut self, db: &mut Db) -> RespBody {
+    /// Runs every queued command for real. Returns the EXEC reply array plus
+    /// any forwards those commands produced — queued writes execute here for
+    /// the first time, so this is the only place their propagation is decided.
+    pub fn exec_transaction(&mut self, db: &mut Db) -> (RespBody, Vec<RespBody>) {
         if self.mode != ClientMode::Transaction {
-            RespBody::new_error(&CommandError::ExecTransaction)
+            (RespBody::new_error(&CommandError::ExecTransaction), vec![])
         } else if self.queue.is_empty() {
             self.make_normal_mode();
             db.remove_watcher(self.id);
-            RespBody::Array(Some(vec![]))
+            (RespBody::Array(Some(vec![])), vec![])
         } else {
             self.make_normal_mode();
             db.remove_watcher(self.id);
             let mut out: Vec<RespBody> = vec![];
+            let mut forwards: Vec<RespBody> = vec![];
             while let Some(item) = self.queue.pop_back() {
                 let reply = self.process_request(db, item);
 
                 let resp_arr: Vec<RespBody> = match reply {
-                    Ok((reply, _)) => self.post_process_success_request(db, reply),
+                    Ok((reply, forward)) => {
+                        if let Some(forward) = forward {
+                            forwards.push(forward);
+                        }
+                        self.post_process_success_request(db, reply).replies
+                    }
                     Err(err) => {
                         debug!(?err, "command error");
                         vec![RespBody::new_error(&err)]
@@ -111,7 +134,7 @@ impl Client {
                 }
             }
 
-            RespBody::Array(Some(out))
+            (RespBody::Array(Some(out)), forwards)
         }
     }
 
@@ -202,26 +225,31 @@ impl Client {
     }
 
     // TODO: improve this STATE machinge and state transitions
-    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> Vec<RespBody> {
-        let mut out = vec![];
+    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> ReplyOutcome {
+        let mut replies = vec![];
+        let mut forwards = vec![];
         match reply {
             Reply::Now(resp, _) => {
                 // self.make_normal_mode();
-                out.push(resp);
+                replies.push(resp);
             }
-            Reply::StartTransaction => out.push(self.start_transaction()),
-            Reply::AddTransaction(resp) => out.push(self.add_to_transaction(resp)),
-            Reply::ExecTransaction => out.push(self.exec_transaction(db)),
-            Reply::DiscardTransaction(resp) => out.push(self.discard_transaction(db, resp)),
+            Reply::StartTransaction => replies.push(self.start_transaction()),
+            Reply::AddTransaction(resp) => replies.push(self.add_to_transaction(resp)),
+            Reply::ExecTransaction => {
+                let (resp, exec_forwards) = self.exec_transaction(db);
+                replies.push(resp);
+                forwards.extend(exec_forwards);
+            }
+            Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
             Reply::Blocked => {}
             Reply::Rdb(sync, rdb) => {
                 warn!("rdb finished handshake on master side");
                 self.promote_to_slave();
-                out.push(sync);
-                out.push(rdb);
+                replies.push(sync);
+                replies.push(rdb);
             }
         }
-        out
+        ReplyOutcome { replies, forwards }
     }
     fn process_request(
         &mut self,
@@ -248,7 +276,9 @@ impl Client {
                         out.push(forward);
                     }
 
-                    self.post_process_success_request(db, reply)
+                    let outcome = self.post_process_success_request(db, reply);
+                    out.extend(outcome.forwards);
+                    outcome.replies
                 }
                 Err(err) => {
                     debug!(?err, "command error");
@@ -283,10 +313,13 @@ impl Client {
 
 #[cfg(test)]
 mod test {
-    use super::{Client, ClientId, Disposition};
+    use super::{Client, ClientId, ClientRole, Disposition};
     use crate::db::Db;
+    use crate::networking::{ServerInfo, ServerRole};
+    use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::rc::Rc;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
@@ -316,7 +349,21 @@ mod test {
         let addr = listener.local_addr().unwrap();
         let peer = TcpStream::connect(addr).unwrap();
         let (owned, _) = listener.accept().unwrap();
-        let client = Client::new(mio::net::TcpStream::from_std(owned), ClientId::new(1));
+        let server_info = Rc::new(RefCell::new(ServerInfo::new(
+            ServerRole::Master,
+            0,
+            "0".repeat(40),
+            0,
+            None,
+            ".".into(),
+            "dump.rdb".into(),
+        )));
+        let client = Client::new(
+            mio::net::TcpStream::from_std(owned),
+            ClientId::new(1),
+            ClientRole::Normal,
+            server_info,
+        );
         (peer, client)
     }
 
@@ -325,7 +372,10 @@ mod test {
         let (mut peer, mut client) = pair();
         peer.write_all(&resp(&[b"PING"])).unwrap();
 
-        assert!(matches!(client.on_readable(&mut db()), Disposition::Keep));
+        assert!(matches!(
+            client.on_readable(&mut db()),
+            (Disposition::Keep, _)
+        ));
 
         let mut reply = [0u8; 7];
         peer.read_exact(&mut reply).unwrap();
@@ -382,6 +432,9 @@ mod test {
         let (peer, mut client) = pair();
         drop(peer); // peer hangs up
 
-        assert!(matches!(client.on_readable(&mut db()), Disposition::Drop));
+        assert!(matches!(
+            client.on_readable(&mut db()),
+            (Disposition::Drop, _)
+        ));
     }
 }
