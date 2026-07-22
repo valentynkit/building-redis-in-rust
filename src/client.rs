@@ -249,13 +249,14 @@ impl Client {
                 }
             };
             for resp in resp_arr {
-                if self.role == ClientRole::Normal {
-                    self.write_out(&resp);
-                } else {
-                    //  slave role
-                    // TODO: I think we should move the slave offset withotu replying to client, and
-                    // the ACK should be handled not by req-resp but in before sleep
-                    todo!()
+                match self.role {
+                    ClientRole::Normal => self.write_out(&resp),
+                    ClientRole::Slave => warn!("slave"),
+                    ClientRole::Master => {
+                        // TODO: I think we should move the slave offset withotu replying to client, and
+                        // the ACK should be handled not by req-resp but in before sleep
+                        warn!("master (on slave) slave should update it offset etc..");
+                    }
                 }
             }
         }
