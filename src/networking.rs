@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead};
+use std::io;
 use std::iter;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -13,10 +13,10 @@ use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
-use crate::Cli;
 use crate::client::{Client, ClientId, ClientRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
+use crate::Cli;
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
@@ -126,7 +126,7 @@ impl Server {
             .duration_since(UNIX_EPOCH)
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
-        let db = Db::create(monotonic_ms, realtime_ms);
+        let db = Db::create(realtime_ms);
         let mut role = ServerRole::Master;
         let mut replica_of_parsed: Option<String> = None;
 
@@ -173,8 +173,14 @@ impl Server {
     // HouseKeeping
     fn before_sleep(&mut self) -> Option<Duration> {
         self.cronloops += 1;
-        let HandleWaitersResult(list_replies, list_deadline) = self.db.handle_waiters();
-        let HandleWaitersResult(stream_replies, stream_deadline) = self.db.handle_stream_waiters();
+        let HandleWaitersResult {
+            replies: list_replies,
+            deadline: list_deadline,
+        } = self.db.handle_list_waiters();
+        let HandleWaitersResult {
+            replies: stream_replies,
+            deadline: stream_deadline,
+        } = self.db.handle_stream_waiters();
 
         for (client_id, resp) in list_replies.into_iter().chain(stream_replies) {
             let client_id = Token(client_id.get());

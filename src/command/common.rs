@@ -1,11 +1,10 @@
 use std::time::Duration;
 
-use anyhow::Error;
 use strum::{AsRefStr, EnumString};
 use thiserror::Error;
 
 use crate::{
-    client::{ClientId, ClientMode},
+    client::ClientId,
     command::InfoSection,
     db::{Db, Key},
     networking::ServerInfo,

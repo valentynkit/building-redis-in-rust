@@ -5,7 +5,7 @@ use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{self, Propagate, Reply, RespBody};
+use crate::resp::{self, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -320,14 +320,14 @@ mod test {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::rc::Rc;
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("SystemTime::now should work with durion since UNIX_EPOCH");
 
-        Db::create(Instant::now(), realtime_ms)
+        Db::create(realtime_ms)
     }
 
     /// Encode a command as a RESP array of bulk strings — what real clients send.
