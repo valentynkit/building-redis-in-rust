@@ -19,7 +19,7 @@ pub fn push(db: &mut Db, side: &Side, key: &[u8], elems: &[Vec<u8>]) -> HandleCm
     let key: Key = key.into();
     let elems: Vec<Value> = elems.iter().map(|item| item.as_slice().into()).collect();
     let out: i64 = match side {
-        Side::Front => db.list_prepand(key, elems)?,
+        Side::Front => db.list_prepend(key, elems)?,
         Side::Back => db.list_append(key, elems)?,
     };
 
@@ -111,11 +111,11 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(Instant::now(), realtime_ms)
+        Db::create(realtime_ms)
     }
 
     fn body(reply: Reply) -> RespBody {

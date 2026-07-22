@@ -24,14 +24,7 @@ pub fn set(
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();
-    let value = db.get(&key);
-
-    let resp: RespBody = value.map_or_else(
-        || RespBody::Simple("none".into()),
-        |obj| RespBody::Simple(obj.type_name().into()),
-    );
-
-    Reply::readonly(resp)
+    Reply::readonly(RespBody::Simple(db.key_type(&key).into()))
 }
 
 pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
@@ -43,11 +36,11 @@ pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(Instant::now(), realtime_ms)
+        Db::create(realtime_ms)
     }
 
     fn body(reply: Reply) -> RespBody {

@@ -1,117 +1,22 @@
-use core::fmt;
+mod key_value;
+mod stream_id;
+pub use key_value::{Key, Value};
+pub use stream_id::{StreamId, StreamIdSpec};
+
 use std::collections::HashSet;
 use std::ops::Bound::Included;
 use std::{
-    borrow::Borrow,
     collections::{BTreeMap, HashMap, VecDeque},
     mem,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-// (ms, seq); tuple order == redis id order, so a BTreeMap stays sorted for XRANGE
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct StreamId(u64, u64);
+use tracing::debug;
+
+use crate::{client::ClientId, command::common::CommandError, resp::RespBody};
+
 pub type Stream = BTreeMap<StreamId, Vec<(Key, Value)>>;
 type Waiters = VecDeque<(ClientId, Option<Duration>)>;
-
-impl fmt::Display for StreamId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.0, self.1)
-    }
-}
-impl StreamId {
-    pub const MAX: Self = Self(u64::MAX, u64::MAX);
-
-    pub const fn incr_seq(&mut self) {
-        self.1 += 1;
-    }
-    pub fn parse(ms: &str, seq: &str) -> Result<Self, CommandError> {
-        let ms: u64 = ms
-            .parse()
-            .map_err(|_| CommandError::ParseStream(ms.into()))?;
-        let seq: u64 = seq
-            .parse()
-            .map_err(|_| CommandError::ParseStream(seq.into()))?;
-        Ok(Self(ms, seq))
-    }
-
-    pub fn parse_opt_seq(string: &str, last: Option<Self>) -> Result<Self, CommandError> {
-        if string.len() == 1 {
-            return match (string, last) {
-                ("+", _) => Ok(Self::MAX),
-                ("$", Some(other)) => Ok(other),
-                ("-", _) | ("$", None) => Ok(Self(0, 0)),
-                _ => Err(CommandError::ParseStream(string.into())),
-            };
-        }
-        if string.contains('-') {
-            let Some((ms, seq)) = string.split_once('-') else {
-                return Err(CommandError::ParseStream(string.into()));
-            };
-            return Self::parse(ms, seq);
-        }
-        let ms: u64 = string
-            .parse()
-            .map_err(|_| CommandError::ParseStream(string.into()))?;
-
-        Ok(Self(ms, 0))
-    }
-
-    pub const fn is_valid(&self, other: &Self) -> bool {
-        let ms_greater = self.0 > other.0;
-        let ms_equal_and_seq_greater = self.0 == other.0 && self.1 > other.1;
-        ms_greater || ms_equal_and_seq_greater
-    }
-}
-
-// XADD accepts an explicit id, a ms part with an auto-generated sequence
-// (<ms>-*), or a fully auto-generated id (*).
-#[derive(Copy, Clone)]
-pub enum StreamIdSpec {
-    Explicit(StreamId),
-    AutoSeq(u64),
-    Auto,
-}
-
-impl StreamIdSpec {
-    pub fn parse(string: &str) -> Result<Self, CommandError> {
-        if string == "*" {
-            return Ok(Self::Auto);
-        }
-
-        let Some((ms, seq)) = string.split_once('-') else {
-            return Err(CommandError::ParseStream(string.into()));
-        };
-
-        if seq == "*" {
-            let ms: u64 = ms
-                .parse()
-                .map_err(|_| CommandError::ParseStream(ms.into()))?;
-            return Ok(Self::AutoSeq(ms));
-        }
-
-        Ok(Self::Explicit(StreamId::parse(ms, seq)?))
-    }
-}
-
-impl From<StreamId> for Vec<u8> {
-    fn from(value: StreamId) -> Self {
-        format!("{0}-{1}", value.0, value.1).into_bytes()
-    }
-}
-
-impl From<StreamId> for String {
-    fn from(value: StreamId) -> Self {
-        format!("{0}-{1}", value.0, value.1)
-    }
-}
-
-impl From<StreamId> for RespBody {
-    fn from(value: StreamId) -> Self {
-        RespBody::Bulk(Some(value.into()))
-    }
-}
-use tracing::{debug, info};
 
 // one type per key; the tagged-union equivalent of C's robj + union pointer
 pub enum Object {
@@ -130,180 +35,79 @@ impl Object {
     }
 }
 
-use crate::client::Client;
-use crate::{client::ClientId, command::common::CommandError, resp::RespBody};
-#[derive(Eq, Default, Debug, PartialEq)]
-pub struct Value {
-    value: Vec<u8>,
-}
-
-impl Value {
-    pub fn from_int(num: i64) -> Self {
-        Self {
-            value: num.to_string().as_bytes().into(),
-        }
-    }
-
-    pub fn as_int(&self) -> Result<i64, CommandError> {
-        str::from_utf8(&self.value)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .ok_or(CommandError::NotAnInteger)
-    }
-}
-
-#[derive(Eq, Default, Debug, Hash, PartialEq, Clone)]
-pub struct Key {
-    value: Vec<u8>,
-}
-
-impl From<Vec<u8>> for Key {
-    fn from(value: Vec<u8>) -> Self {
-        Self { value }
-    }
-}
-
-impl From<Vec<u8>> for Value {
-    fn from(value: Vec<u8>) -> Self {
-        Self { value }
-    }
-}
-
-impl From<&[u8]> for Key {
-    fn from(value: &[u8]) -> Self {
-        Self {
-            value: value.into(),
-        }
-    }
-}
-
-impl From<&[u8]> for Value {
-    fn from(value: &[u8]) -> Self {
-        Self {
-            value: value.into(),
-        }
-    }
-}
-impl From<Key> for Vec<u8> {
-    fn from(value: Key) -> Vec<u8> {
-        value.value
-    }
-}
-
-impl From<Value> for Vec<u8> {
-    fn from(value: Value) -> Vec<u8> {
-        value.value
-    }
-}
-
-impl From<&Value> for Vec<u8> {
-    fn from(value: &Value) -> Vec<u8> {
-        value.value.clone()
-    }
-}
-
-impl From<Key> for RespBody {
-    fn from(value: Key) -> Self {
-        RespBody::Bulk(Some(value.into()))
-    }
-}
-
-impl From<&Key> for RespBody {
-    fn from(value: &Key) -> Self {
-        RespBody::Bulk(Some(value.clone().into()))
-    }
-}
-
-impl From<Value> for RespBody {
-    fn from(value: Value) -> Self {
-        RespBody::Bulk(Some(value.into()))
-    }
-}
-
-impl From<&Value> for RespBody {
-    fn from(value: &Value) -> Self {
-        RespBody::Bulk(Some(value.into()))
-    }
-}
-impl Borrow<[u8]> for Key {
-    fn borrow(&self) -> &[u8] {
-        &self.value
-    }
-}
-
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&String::from_utf8_lossy(&self.value))
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&String::from_utf8_lossy(&self.value))
-    }
-}
-
 // One client's pending XREAD BLOCK: which (key, exclusive-lower-bound) pairs
 // it's watching, and when to give up and reply with a null array.
 struct StreamWait {
     client_id: ClientId,
-    watch: Vec<(Key, StreamId)>,
+    positions: Vec<(Key, StreamId)>,
     deadline: Option<Duration>,
 }
-pub struct ClientWatch {
+
+// bidirectional index between watched keys and the clients watching them
+struct ClientWatch {
     keys: HashSet<Key>,
     dirty: bool,
 }
 
 impl ClientWatch {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             keys: HashSet::new(),
             dirty: false,
         }
     }
-    pub fn add(&mut self, key: Key) {
+
+    fn add(&mut self, key: Key) {
         self.keys.insert(key);
     }
 
-    pub fn make_dirty(&mut self) {
+    fn make_dirty(&mut self) {
         self.dirty = true;
     }
 
-    pub fn remove(&mut self) -> Option<HashSet<Key>> {
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn remove(&mut self) -> Option<HashSet<Key>> {
         Some(mem::take(&mut self.keys))
     }
 }
+
+pub struct HandleWaitersResult {
+    pub replies: HashMap<ClientId, RespBody>,
+    pub deadline: Option<Duration>,
+}
+
 pub struct Db {
     keyspace: HashMap<Key, Object>,
     expires: HashMap<Key, Duration>,
-    waiters: HashMap<Key, Waiters>,
-    // double side structure watchers <-> clients_watchers
-    watchers: HashMap<Key, HashSet<ClientId>>,
-    clients_watchers: HashMap<ClientId, ClientWatch>,
+    list_waiters: HashMap<Key, Waiters>,
+    key_watchers: HashMap<Key, HashSet<ClientId>>,
+    client_watches: HashMap<ClientId, ClientWatch>,
     outbox: Vec<Key>,
     stream_waiters: Vec<StreamWait>,
-    start_ms: Instant,
     realtime_ms: Duration,
 }
 
-pub struct HandleWaitersResult(pub HashMap<ClientId, RespBody>, pub Option<Duration>);
-
 impl Db {
-    pub fn create(start_ms: Instant, realtime_ms: Duration) -> Self {
+    pub fn create(realtime_ms: Duration) -> Self {
         debug!("db initialized");
         Self {
             keyspace: HashMap::new(),
             expires: HashMap::new(),
-            waiters: HashMap::new(),
-            watchers: HashMap::new(),
-            clients_watchers: HashMap::new(),
+            list_waiters: HashMap::new(),
+            key_watchers: HashMap::new(),
+            client_watches: HashMap::new(),
             outbox: Vec::new(),
             stream_waiters: Vec::new(),
-            start_ms,
             realtime_ms,
         }
     }
+
+    // ---------------------------------------------------------------
+    // String ops
+    // ---------------------------------------------------------------
 
     // Ok(None) = absent, Ok(Some) = right type, Err = wrong type
     pub fn as_string(&mut self, key: &Key) -> Result<Option<&Value>, CommandError> {
@@ -316,6 +120,34 @@ impl Db {
             Some(_) => Err(CommandError::WrongType("string".into())),
         }
     }
+
+    fn set(&mut self, key: Key, value: Value) {
+        self.make_dirty(key.clone());
+        self.keyspace.insert(key, Object::String(value));
+    }
+
+    pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) {
+        if let Some(ex) = ex_at {
+            self.expires.insert(key.clone(), ex);
+        }
+
+        self.set(key, value);
+    }
+
+    pub fn incr(&mut self, key: Key) -> Result<i64, CommandError> {
+        let value = self.as_string(&key)?;
+        let new_value = match value {
+            Some(value) => Value::from_int(value.parse_int()? + 1),
+            None => Value::from_int(1),
+        };
+        let out = new_value.parse_int()?;
+        self.set(key, new_value);
+        Ok(out)
+    }
+
+    // ---------------------------------------------------------------
+    // List ops
+    // ---------------------------------------------------------------
 
     fn as_list(&mut self, key: &Key) -> Result<Option<&VecDeque<Value>>, CommandError> {
         if self.expire_clean(key) {
@@ -339,17 +171,6 @@ impl Db {
         }
     }
 
-    pub fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
-        if self.expire_clean(key) {
-            return Ok(None);
-        }
-        match self.keyspace.get(key) {
-            None => Ok(None),
-            Some(Object::Stream(stream)) => Ok(Some(stream)),
-            Some(_) => Err(CommandError::WrongType("stream".into())),
-        }
-    }
-
     // or_insert_with only inserts when absent, so a wrong-type key isn't clobbered
     fn list_or_create(&mut self, key: &Key) -> Result<&mut VecDeque<Value>, CommandError> {
         match self
@@ -362,297 +183,10 @@ impl Db {
         }
     }
 
-    pub fn stream_or_create(&mut self, key: &Key) -> Result<&mut Stream, CommandError> {
-        match self
-            .keyspace
-            .entry(key.clone())
-            .or_insert_with(|| Object::Stream(Stream::new()))
-        {
-            Object::Stream(stream) => Ok(stream),
-            _ => Err(CommandError::WrongType("stream".into())),
-        }
-    }
-    fn get_or_create_client_watchers(&mut self, cur_client: ClientId) -> &mut ClientWatch {
-        self.clients_watchers
-            .entry(cur_client)
-            .or_insert_with(ClientWatch::new)
-    }
-
-    pub fn add_watchers(&mut self, keys: Vec<Key>, cur_client: ClientId) {
-        for key in keys {
-            self.get_or_create_client_watchers(cur_client)
-                .keys
-                .insert(key.clone());
-            self.watchers.entry(key).or_default().insert(cur_client);
-        }
-    }
-
-    pub fn key_type(&mut self, key: &Key) -> &'static str {
-        if self.expire_clean(key) {
-            return "none";
-        }
-        self.keyspace.get(key).map_or("none", Object::type_name)
-    }
-    pub fn make_dirty(&mut self, key: Key) {
-        if let Some(watchers) = self.watchers.get_mut(&key) {
-            for client in watchers.iter() {
-                if let Some(client) = self.clients_watchers.get_mut(client) {
-                    client.make_dirty();
-                }
-            }
-        }
-    }
-
-    pub fn is_dirty(&self, cur_client: ClientId) -> bool {
-        if let Some(client) = self.clients_watchers.get(&cur_client) {
-            return client.dirty;
-        }
-        false
-    }
-    pub fn remove_watcher(&mut self, cur_client: ClientId) {
-        if let Some(ClientWatch { keys, .. }) = self.clients_watchers.remove(&cur_client) {
-            for key in keys {
-                if let Some(watchers) = self.watchers.get_mut(&key) {
-                    watchers.remove(&cur_client);
-                    if watchers.is_empty() {
-                        self.watchers.remove(&key);
-                    }
-                }
-            }
-        }
-    }
-
-    // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
-    pub fn handle_waiters(&mut self) -> HandleWaitersResult {
-        let date_now = self.realtime_ms();
-        let mut nearest_deadline: Option<Duration> = None;
-        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
-        // cleanup timeout waiters
-        self.waiters.retain(|_key, waiters| {
-            waiters.retain(|(client_id, timeout)| {
-                let mut is_expired: bool = false;
-                if let Some(value) = timeout {
-                    is_expired = *value <= date_now;
-                    if is_expired {
-                        out.insert(*client_id, RespBody::Array(None));
-                    } else {
-                        let deadline = (*value).checked_sub(date_now).unwrap();
-                        nearest_deadline =
-                            Some(nearest_deadline.map_or(deadline, |cur| cur.min(deadline)));
-                    }
-                }
-                !is_expired
-            });
-            !waiters.is_empty()
-        });
-
-        let outbox = mem::take(&mut self.outbox);
-        for key in &outbox {
-            // index keyspace + waiters directly (not as_list_mut) so the two
-            // fields borrow disjointly
-            loop {
-                let Some(Object::List(list)) = self.keyspace.get_mut(key) else {
-                    break;
-                };
-                if list.is_empty() {
-                    break;
-                }
-                let Some(waiters) = self.waiters.get_mut(key) else {
-                    break;
-                };
-                if waiters.is_empty() {
-                    break;
-                }
-                let (fd, _timeout) = waiters
-                    .pop_front()
-                    .expect("queue is guaranteed by the is_empty check before");
-                let item = list
-                    .pop_front()
-                    .expect("value is guaranteed by the is_empty check before");
-                out.insert(
-                    fd,
-                    RespBody::Array(Some(vec![
-                        RespBody::from(key.clone()),
-                        RespBody::from(item),
-                    ])),
-                );
-
-                self.make_dirty(key.clone());
-            }
-        }
-        HandleWaitersResult(out, nearest_deadline)
-    }
-
-    // Non-blocking XREAD range check, reused for both the immediate reply and
-    // re-checking a blocked client on wake — reading a stream is non-destructive,
-    // so there's nothing to precompute at registration time, just re-run this.
-    pub fn xread_snapshot(
-        &mut self,
-        watch: &[(Key, StreamId)],
-    ) -> Result<Option<RespBody>, CommandError> {
-        let mut streams: Vec<RespBody> = Vec::new();
-        for (key, id_start) in watch {
-            let field_items: Vec<RespBody> = self
-                .stream_range(key, *id_start, StreamId::MAX)?
-                .into_iter()
-                .map(|(id, fields)| {
-                    let field_arr: RespBody = fields
-                        .iter()
-                        .flat_map(|(k, v)| [RespBody::from(k), RespBody::from(v)])
-                        .collect();
-                    RespBody::Array(Some(vec![RespBody::from(*id), field_arr]))
-                })
-                .collect();
-
-            if !field_items.is_empty() {
-                streams.push(RespBody::Array(Some(vec![
-                    RespBody::from(key),
-                    field_items.into_iter().collect(),
-                ])));
-            }
-        }
-        Ok(if streams.is_empty() {
-            None
-        } else {
-            Some(streams.into_iter().collect())
-        })
-    }
-
-    pub fn xread_wait(
-        &mut self,
-        client_id: ClientId,
-        watch: Vec<(Key, StreamId)>,
-        timeout: Option<Duration>,
-    ) {
-        let deadline = timeout.map(|t| self.realtime_ms + t);
-        self.stream_waiters.push(StreamWait {
-            client_id,
-            watch,
-            deadline,
-        });
-    }
-
-    // ponytail: re-checks every pending wait on every tick rather than being
-    // edge-triggered off an outbox — reads are cheap range queries and waiter
-    // counts are small, so the simpler always-rescan approach is fine here.
-    pub fn handle_stream_waiters(&mut self) -> HandleWaitersResult {
-        let date_now = self.realtime_ms();
-        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
-        let mut nearest_deadline: Option<Duration> = None;
-
-        let pending = mem::take(&mut self.stream_waiters);
-        self.stream_waiters = pending
-            .into_iter()
-            .filter_map(|wait| {
-                if let Ok(Some(resp)) = self.xread_snapshot(&wait.watch) {
-                    out.insert(wait.client_id, resp);
-                    return None;
-                }
-                if let Some(deadline) = wait.deadline {
-                    if deadline <= date_now {
-                        out.insert(wait.client_id, RespBody::Array(None));
-                        return None;
-                    }
-
-                    // TODO: handle this better
-                    // I think the invariant is guaranteed by upper if deadline <= date_now {
-                    let remaining = deadline.checked_sub(date_now).unwrap();
-
-                    nearest_deadline =
-                        Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
-                }
-                Some(wait)
-            })
-            .collect();
-
-        HandleWaitersResult(out, nearest_deadline)
-    }
-
-    pub const fn update_time(&mut self, realtime_ms: Duration) {
-        self.realtime_ms = realtime_ms;
-    }
-
-    pub const fn realtime_ms(&self) -> Duration {
-        self.realtime_ms
-    }
-
-    pub fn remove(&mut self, key: &Key) {
-        self.make_dirty(key.clone());
-        self.keyspace.remove(key);
-        self.expires.remove(key);
-    }
-
-    pub fn list_prepand(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
-        self.make_dirty(key.clone());
-        let list = self.list_or_create(&key)?;
-
-        for e in elems {
-            list.push_front(e);
-        }
-
-        let len = list.len() as i64; // ends the borrow before we touch self below
-
-        if self.waiters.contains_key(&key) {
-            info!(%key, "adding outbox");
-            self.outbox.push(key);
-        }
-
-        Ok(len)
-    }
-
     pub fn list_len(&mut self, key: Key) -> Result<i64, CommandError> {
         let list = self.as_list(&key)?;
 
         Ok(list.map_or(0, |list| list.len() as i64))
-    }
-
-    pub fn blpop(
-        &mut self,
-        key: Key,
-        timeout: Option<Duration>,
-        cur_client: ClientId,
-    ) -> Result<Option<Value>, CommandError> {
-        self.make_dirty(key.clone());
-        // TODO: could be refactored
-        if let Some(list) = self.as_list_mut(&key)?
-            && let Some(item) = list.pop_front()
-        {
-            return Ok(Some(item));
-        }
-
-        info!(%key, "adding waiter");
-        let waiters = self.waiters.entry(key).or_default();
-        let deadline = timeout.map(|t| self.realtime_ms + t);
-        waiters.push_back((cur_client, deadline));
-        Ok(None)
-    }
-
-    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
-        self.make_dirty(key.clone());
-        let list = self.list_or_create(&key)?;
-        list.extend(elems);
-        let len = list.len() as i64; // ends the borrow before we touch self below
-
-        if self.waiters.contains_key(&key) {
-            self.outbox.push(key);
-        }
-        Ok(len)
-    }
-
-    pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
-        self.make_dirty(key.clone());
-        let mut out: Vec<Value> = vec![];
-        let Some(list) = self.as_list_mut(key)? else {
-            return Ok(out);
-        };
-
-        let len = len.min(list.len());
-        for _ in 0..len {
-            if let Some(item) = list.pop_front() {
-                out.push(item);
-            }
-        }
-        Ok(out)
     }
 
     // Redis clamps out-of-range indices to the available elements rather than erroring
@@ -684,31 +218,101 @@ impl Db {
         }
         Ok(l.range(from as usize..=to as usize).collect())
     }
-    // Lazy Epiration
-    fn expire_clean(&mut self, key: &Key) -> bool {
-        let is_expired = self
-            .expires
-            .get(key)
-            .is_some_and(|&exp| exp <= self.realtime_ms);
 
-        if is_expired {
-            self.remove(key);
-        }
-
-        is_expired
-    }
-
-    fn set(&mut self, key: Key, value: Value) {
+    pub fn list_prepend(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
         self.make_dirty(key.clone());
-        self.keyspace.insert(key, Object::String(value));
+        let list = self.list_or_create(&key)?;
+
+        for e in elems {
+            list.push_front(e);
+        }
+
+        let len = list.len() as i64; // ends the borrow before we touch self below
+
+        if self.list_waiters.contains_key(&key) {
+            debug!(%key, "adding outbox");
+            self.outbox.push(key);
+        }
+
+        Ok(len)
     }
 
-    pub fn get(&mut self, key: &Key) -> Option<&Object> {
-        if self.expire_clean(key) {
-            return None;
+    pub fn list_append(&mut self, key: Key, elems: Vec<Value>) -> Result<i64, CommandError> {
+        self.make_dirty(key.clone());
+        let list = self.list_or_create(&key)?;
+        list.extend(elems);
+        let len = list.len() as i64; // ends the borrow before we touch self below
+
+        if self.list_waiters.contains_key(&key) {
+            debug!(%key, "adding outbox");
+            self.outbox.push(key);
         }
-        self.keyspace.get(key)
+        Ok(len)
     }
+
+    pub fn list_pop(&mut self, key: &Key, len: usize) -> Result<Vec<Value>, CommandError> {
+        self.make_dirty(key.clone());
+        let mut out: Vec<Value> = vec![];
+        let Some(list) = self.as_list_mut(key)? else {
+            return Ok(out);
+        };
+
+        let len = len.min(list.len());
+        for _ in 0..len {
+            if let Some(item) = list.pop_front() {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn blpop(
+        &mut self,
+        key: Key,
+        timeout: Option<Duration>,
+        client_id: ClientId,
+    ) -> Result<Option<Value>, CommandError> {
+        self.make_dirty(key.clone());
+        // TODO: could be refactored
+        if let Some(list) = self.as_list_mut(&key)?
+            && let Some(item) = list.pop_front()
+        {
+            return Ok(Some(item));
+        }
+
+        debug!(%key, "adding waiter");
+        let waiters = self.list_waiters.entry(key).or_default();
+        let deadline = timeout.map(|t| self.realtime_ms + t);
+        waiters.push_back((client_id, deadline));
+        Ok(None)
+    }
+
+    // ---------------------------------------------------------------
+    // Stream ops
+    // ---------------------------------------------------------------
+
+    pub fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
+        if self.expire_clean(key) {
+            return Ok(None);
+        }
+        match self.keyspace.get(key) {
+            None => Ok(None),
+            Some(Object::Stream(stream)) => Ok(Some(stream)),
+            Some(_) => Err(CommandError::WrongType("stream".into())),
+        }
+    }
+
+    pub fn stream_or_create(&mut self, key: &Key) -> Result<&mut Stream, CommandError> {
+        match self
+            .keyspace
+            .entry(key.clone())
+            .or_insert_with(|| Object::Stream(Stream::new()))
+        {
+            Object::Stream(stream) => Ok(stream),
+            _ => Err(CommandError::WrongType("stream".into())),
+        }
+    }
+
     pub fn stream_range(
         &mut self,
         key: &Key,
@@ -720,6 +324,7 @@ impl Db {
         };
         Ok(stream.range((Included(start), Included(end))).collect())
     }
+
     pub fn stream_add(
         &mut self,
         key: &Key,
@@ -735,22 +340,22 @@ impl Db {
             StreamIdSpec::Explicit(id) => id,
             StreamIdSpec::AutoSeq(ms) => {
                 let seq = match last {
-                    Some(StreamId(last_ms, last_seq)) if last_ms == ms => last_seq + 1,
+                    Some(last) if last.ms() == ms => last.seq() + 1,
                     _ if ms == 0 => 1,
                     _ => 0,
                 };
-                StreamId(ms, seq)
+                StreamId::new(ms, seq)
             }
             StreamIdSpec::Auto => {
                 let seq = match last {
-                    Some(StreamId(last_ms, last_seq)) if last_ms == realtime_ms => last_seq + 1,
+                    Some(last) if last.ms() == realtime_ms => last.seq() + 1,
                     _ => 0,
                 };
-                StreamId(realtime_ms, seq)
+                StreamId::new(realtime_ms, seq)
             }
         };
 
-        if stream_id == StreamId(0, 0) {
+        if stream_id == StreamId::ZERO {
             return Err(CommandError::InvalidStreamZero);
         }
         if let Some(id) = last
@@ -764,27 +369,257 @@ impl Db {
         Ok(stream_id)
     }
 
-    pub fn setex(&mut self, key: Key, value: Value, ex_at: Option<Duration>) {
-        if let Some(ex) = ex_at {
-            self.expires.insert(key.clone(), ex);
+    // Non-blocking XREAD range check, reused for both the immediate reply and
+    // re-checking a blocked client on wake — reading a stream is non-destructive,
+    // so there's nothing to precompute at registration time, just re-run this.
+    pub fn xread_snapshot(
+        &mut self,
+        positions: &[(Key, StreamId)],
+    ) -> Result<Option<RespBody>, CommandError> {
+        let mut streams: Vec<RespBody> = Vec::new();
+        for (key, id_start) in positions {
+            let field_items: Vec<RespBody> = self
+                .stream_range(key, *id_start, StreamId::MAX)?
+                .into_iter()
+                .map(|(id, fields)| {
+                    let field_arr: RespBody = fields
+                        .iter()
+                        .flat_map(|(k, v)| [RespBody::from(k), RespBody::from(v)])
+                        .collect();
+                    RespBody::Array(Some(vec![RespBody::from(*id), field_arr]))
+                })
+                .collect();
+
+            if !field_items.is_empty() {
+                streams.push(RespBody::Array(Some(vec![
+                    RespBody::from(key),
+                    field_items.into_iter().collect(),
+                ])));
+            }
+        }
+        Ok(if streams.is_empty() {
+            None
+        } else {
+            Some(streams.into_iter().collect())
+        })
+    }
+
+    pub fn xread_wait(
+        &mut self,
+        client_id: ClientId,
+        positions: Vec<(Key, StreamId)>,
+        timeout: Option<Duration>,
+    ) {
+        debug!(?client_id, num_keys = positions.len(), "registering stream waiter");
+        let deadline = timeout.map(|t| self.realtime_ms + t);
+        self.stream_waiters.push(StreamWait {
+            client_id,
+            positions,
+            deadline,
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Watcher ops (WATCH / MULTI dirty-tracking)
+    // ---------------------------------------------------------------
+
+    fn get_or_create_client_watchers(&mut self, client_id: ClientId) -> &mut ClientWatch {
+        self.client_watches
+            .entry(client_id)
+            .or_insert_with(ClientWatch::new)
+    }
+
+    pub fn add_watchers(&mut self, keys: Vec<Key>, client_id: ClientId) {
+        for key in keys {
+            self.get_or_create_client_watchers(client_id).add(key.clone());
+            self.key_watchers.entry(key).or_default().insert(client_id);
+        }
+    }
+
+    pub fn make_dirty(&mut self, key: Key) {
+        if let Some(watchers) = self.key_watchers.get_mut(&key) {
+            for client in watchers.iter() {
+                if let Some(client) = self.client_watches.get_mut(client) {
+                    client.make_dirty();
+                }
+            }
+        }
+    }
+
+    pub fn is_dirty(&self, client_id: ClientId) -> bool {
+        if let Some(client) = self.client_watches.get(&client_id) {
+            return client.is_dirty();
+        }
+        false
+    }
+
+    pub fn remove_watcher(&mut self, client_id: ClientId) {
+        if let Some(mut watch) = self.client_watches.remove(&client_id) {
+            let keys = watch.remove().unwrap_or_default();
+            for key in keys {
+                if let Some(watchers) = self.key_watchers.get_mut(&key) {
+                    watchers.remove(&client_id);
+                    if watchers.is_empty() {
+                        self.key_watchers.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Waiter housekeeping — called once per event-loop tick
+    // ---------------------------------------------------------------
+
+    // TODO: consider refactoring for better lifetimes and optimizing to avoid using clone
+    pub fn handle_list_waiters(&mut self) -> HandleWaitersResult {
+        let date_now = self.realtime_ms();
+        let mut nearest_deadline: Option<Duration> = None;
+        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
+        // cleanup timeout waiters
+        self.list_waiters.retain(|_key, waiters| {
+            waiters.retain(|(client_id, timeout)| {
+                let mut is_expired: bool = false;
+                if let Some(value) = timeout {
+                    is_expired = *value <= date_now;
+                    if is_expired {
+                        out.insert(*client_id, RespBody::Array(None));
+                    } else {
+                        let deadline = (*value).checked_sub(date_now).unwrap();
+                        nearest_deadline =
+                            Some(nearest_deadline.map_or(deadline, |cur| cur.min(deadline)));
+                    }
+                }
+                !is_expired
+            });
+            !waiters.is_empty()
+        });
+
+        let outbox = mem::take(&mut self.outbox);
+        for key in &outbox {
+            // index keyspace + waiters directly (not as_list_mut) so the two
+            // fields borrow disjointly
+            loop {
+                let Some(Object::List(list)) = self.keyspace.get_mut(key) else {
+                    break;
+                };
+                if list.is_empty() {
+                    break;
+                }
+                let Some(waiters) = self.list_waiters.get_mut(key) else {
+                    break;
+                };
+                if waiters.is_empty() {
+                    break;
+                }
+                let (client_id, _timeout) = waiters
+                    .pop_front()
+                    .expect("queue is guaranteed by the is_empty check before");
+                let item = list
+                    .pop_front()
+                    .expect("value is guaranteed by the is_empty check before");
+                out.insert(
+                    client_id,
+                    RespBody::Array(Some(vec![
+                        RespBody::from(key.clone()),
+                        RespBody::from(item),
+                    ])),
+                );
+
+                self.make_dirty(key.clone());
+            }
+        }
+        HandleWaitersResult {
+            replies: out,
+            deadline: nearest_deadline,
+        }
+    }
+
+    // ponytail: re-checks every pending wait on every tick rather than being
+    // edge-triggered off an outbox — reads are cheap range queries and waiter
+    // counts are small, so the simpler always-rescan approach is fine here.
+    pub fn handle_stream_waiters(&mut self) -> HandleWaitersResult {
+        let date_now = self.realtime_ms();
+        let mut out: HashMap<ClientId, RespBody> = HashMap::new();
+        let mut nearest_deadline: Option<Duration> = None;
+
+        let pending = mem::take(&mut self.stream_waiters);
+        self.stream_waiters = pending
+            .into_iter()
+            .filter_map(|wait| {
+                if let Ok(Some(resp)) = self.xread_snapshot(&wait.positions) {
+                    out.insert(wait.client_id, resp);
+                    return None;
+                }
+                if let Some(deadline) = wait.deadline {
+                    if deadline <= date_now {
+                        out.insert(wait.client_id, RespBody::Array(None));
+                        return None;
+                    }
+
+                    // TODO: handle this better
+                    // I think the invariant is guaranteed by upper if deadline <= date_now {
+                    let remaining = deadline.checked_sub(date_now).unwrap();
+
+                    nearest_deadline =
+                        Some(nearest_deadline.map_or(remaining, |cur| cur.min(remaining)));
+                }
+                Some(wait)
+            })
+            .collect();
+
+        HandleWaitersResult {
+            replies: out,
+            deadline: nearest_deadline,
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Clock
+    // ---------------------------------------------------------------
+
+    pub const fn update_time(&mut self, realtime_ms: Duration) {
+        self.realtime_ms = realtime_ms;
+    }
+
+    pub const fn realtime_ms(&self) -> Duration {
+        self.realtime_ms
+    }
+
+    // ---------------------------------------------------------------
+    // Lifecycle / generic
+    // ---------------------------------------------------------------
+
+    pub fn key_type(&mut self, key: &Key) -> &'static str {
+        if self.expire_clean(key) {
+            return "none";
+        }
+        self.keyspace.get(key).map_or("none", Object::type_name)
+    }
+
+    pub fn remove(&mut self, key: &Key) {
+        self.make_dirty(key.clone());
+        self.keyspace.remove(key);
+        self.expires.remove(key);
+    }
+
+    // ---------------------------------------------------------------
+    // Private helpers used across more than one family above
+    // ---------------------------------------------------------------
+
+    // Lazy expiration
+    fn expire_clean(&mut self, key: &Key) -> bool {
+        let is_expired = self
+            .expires
+            .get(key)
+            .is_some_and(|&exp| exp <= self.realtime_ms);
+
+        if is_expired {
+            debug!(%key, "key expired");
+            self.remove(key);
         }
 
-        self.set(key, value);
-    }
-    pub fn incr(&mut self, key: Key) -> Result<i64, CommandError> {
-        let value = self.as_string(&key)?;
-        let new_value = match value {
-            Some(value) => Value::from_int(
-                value
-                    .as_int()?
-                    .checked_add(1)
-                    .ok_or(CommandError::IntOverflow)?,
-            ),
-            None => Value::from_int(1),
-        };
-        let out = new_value.as_int()?;
-        self.set(key, new_value);
-        Ok(out)
+        is_expired
     }
 }
 
@@ -797,7 +632,7 @@ mod test {
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(Instant::now(), realtime_ms)
+        Db::create(realtime_ms)
     }
 
     #[test]
@@ -853,12 +688,12 @@ mod test {
     }
 
     #[test]
-    fn list_append_and_prepand_order_elements() {
+    fn list_append_and_prepend_order_elements() {
         let mut db = db();
         let key: Key = b"mylist".to_vec().into();
         db.list_append(key.clone(), vec![b"b".to_vec().into()])
             .unwrap();
-        db.list_prepand(key.clone(), vec![b"a".to_vec().into()])
+        db.list_prepend(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
 
         let items = db.list_get(&key, 0, -1).unwrap();
@@ -893,7 +728,7 @@ mod test {
         let mut db = db();
         let key: Key = b"mystream".to_vec().into();
         assert!(matches!(
-            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(0, 0)), vec![]),
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId::ZERO), vec![]),
             Err(CommandError::InvalidStreamZero)
         ));
     }
@@ -902,15 +737,15 @@ mod test {
     fn stream_add_rejects_id_not_greater_than_top_item() {
         let mut db = db();
         let key: Key = b"mystream".to_vec().into();
-        db.stream_add(&key, StreamIdSpec::Explicit(StreamId(1, 1)), vec![])
+        db.stream_add(&key, StreamIdSpec::Explicit(StreamId::new(1, 1)), vec![])
             .unwrap();
 
         assert!(matches!(
-            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(1, 1)), vec![]),
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId::new(1, 1)), vec![]),
             Err(CommandError::InvalidStream)
         ));
         assert!(matches!(
-            db.stream_add(&key, StreamIdSpec::Explicit(StreamId(0, 3)), vec![]),
+            db.stream_add(&key, StreamIdSpec::Explicit(StreamId::new(0, 3)), vec![]),
             Err(CommandError::InvalidStream)
         ));
     }
@@ -970,7 +805,10 @@ mod test {
         // a later push now delivers straight to the waiting client via the outbox.
         db.list_append(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
-        let HandleWaitersResult(mut delivered, _deadline) = db.handle_waiters();
+        let HandleWaitersResult {
+            replies: mut delivered,
+            deadline: _deadline,
+        } = db.handle_list_waiters();
         let resp = delivered.remove(&ClientId::new(1)).unwrap();
         let RespBody::Array(Some(items)) = resp else {
             panic!("expected an array reply");

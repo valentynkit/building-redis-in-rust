@@ -49,7 +49,7 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
     }
     let (keys, ids) = elems.split_at(elems.len() / 2);
 
-    let watch: Vec<(Key, StreamId)> = keys
+    let positions: Vec<(Key, StreamId)> = keys
         .iter()
         .zip(ids)
         .map(|(key, id)| {
@@ -63,17 +63,17 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
         })
         .collect::<Result<_, CommandError>>()?;
 
-    if let Some(resp) = db.xread_snapshot(&watch)? {
+    if let Some(resp) = db.xread_snapshot(&positions)? {
         return Ok(Reply::readonly(resp));
     }
     let reply = match block {
         BlockMode::NotBlocking => Reply::readonly(RespBody::Array(None)),
         BlockMode::Forever => {
-            db.xread_wait(client_id, watch, None);
+            db.xread_wait(client_id, positions, None);
             Reply::Blocked
         }
         BlockMode::Timeout(timeout) => {
-            db.xread_wait(client_id, watch, Some(timeout));
+            db.xread_wait(client_id, positions, Some(timeout));
             Reply::Blocked
         }
     };
