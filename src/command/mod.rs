@@ -15,7 +15,7 @@ use crate::db::Db;
 use crate::networking::ServerInfo;
 use crate::resp::{Propagate, Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{Span, debug, error, field, info, warn};
+use tracing::{debug, error, field, info, warn, Span};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -269,7 +269,7 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
         }
     };
 
-    let rdb = RespBody::RDB(buffer);
+    let rdb = RespBody::Rdb(buffer);
     Ok(Reply::Rdb(RespBody::Simple(out), rdb))
 }
 

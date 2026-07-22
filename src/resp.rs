@@ -1,5 +1,7 @@
 // find star,
 
+use tracing::trace;
+
 use crate::command::common::CommandError;
 
 pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
@@ -25,7 +27,13 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
         let part_slice = buf.get(cursor..cursor + part_size)?;
         cursor += part_size;
 
-        if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+        let part_end = buf.get(cursor..cursor + 2)?;
+        if !validate_part_end(part_end) {
+            trace!(
+                cursor,
+                ?part_end,
+                "malformed resp frame: missing trailing CRLF"
+            );
             return None;
         }
         cursor += 2;
@@ -35,17 +43,55 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
     Some(Resp::new(output, cursor))
 }
 
-const END_OF_LINE: &[u8; 2] = b"\r\n";
-
 pub enum RespBody {
     Simple(String),
-    RDB(Vec<u8>),
+    Rdb(Vec<u8>),
     Error(String),
     Integer(i64),
     // TODO: consider migrating to Bytes/BytesMut instead of u8
     Bulk(Option<Vec<u8>>),
     Array(Option<Vec<Self>>),
 }
+
+impl RespBody {
+    pub fn new_error(error: &CommandError) -> Self {
+        Self::Error(error.to_string())
+    }
+    pub fn new_queued() -> Self {
+        Self::Simple("QUEUED".into())
+    }
+
+    pub fn new_ok() -> Self {
+        Self::Simple("OK".into())
+    }
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Simple(s) => write_simple_string(out, s),
+            Self::Rdb(bytes) => write_rdb(out, bytes),
+            Self::Error(s) => write_simple_error(out, s),
+            Self::Integer(num) => write_int(out, *num),
+            Self::Bulk(None) => write_null_bulk(out),
+            Self::Bulk(Some(bulk_str)) => write_bulk_string(out, bulk_str),
+            Self::Array(None) => write_null_array(out),
+            Self::Array(Some(value)) => write_arr(out, value),
+        }
+    }
+
+    // A client request is always Array(Some([Bulk, Bulk, ...])) flatten to raw args.
+    pub fn into_args(self) -> Option<Vec<Vec<u8>>> {
+        let Self::Array(Some(items)) = self else {
+            return None;
+        };
+        items
+            .into_iter()
+            .map(|item| match item {
+                Self::Bulk(Some(bytes)) => Some(bytes),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 impl From<&str> for RespBody {
     fn from(value: &str) -> Self {
         Self::Bulk(Some(value.as_bytes().to_vec()))
@@ -89,7 +135,7 @@ impl Reply {
 }
 
 pub struct Resp {
-    pub body: RespBody,
+    body: RespBody,
     consumed: usize,
 }
 
@@ -114,44 +160,7 @@ impl Resp {
     }
 }
 
-impl RespBody {
-    pub fn new_error(error: &CommandError) -> Self {
-        Self::Error(error.to_string())
-    }
-    pub fn new_queued() -> Self {
-        Self::Simple("QUEUED".into())
-    }
-
-    pub fn new_ok() -> Self {
-        Self::Simple("OK".into())
-    }
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Simple(s) => write_simple_string(out, s),
-            Self::RDB(bytes) => write_rdb(out, bytes),
-            Self::Error(s) => write_simple_error(out, s),
-            Self::Integer(num) => write_int(out, *num),
-            Self::Bulk(None) => write_null_bulk(out),
-            Self::Bulk(Some(bulk_str)) => write_bulk_string(out, bulk_str),
-            Self::Array(None) => write_null_array(out),
-            Self::Array(Some(value)) => write_arr(out, value),
-        }
-    }
-
-    // A client request is always Array(Some([Bulk, Bulk, ...])) flatten to raw args.
-    pub fn into_args(self) -> Option<Vec<Vec<u8>>> {
-        let Self::Array(Some(items)) = self else {
-            return None;
-        };
-        items
-            .into_iter()
-            .map(|item| match item {
-                Self::Bulk(Some(bytes)) => Some(bytes),
-                _ => None,
-            })
-            .collect()
-    }
-}
+const END_OF_LINE: &[u8; 2] = b"\r\n";
 
 // *{v.len()}\r\n then recurse e.encode(out) per element
 fn write_arr(out: &mut Vec<u8>, items: &[RespBody]) {
@@ -208,7 +217,7 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
-    use crate::resp::{RespBody, parse_resp};
+    use crate::resp::{parse_resp, RespBody};
 
     #[test]
     fn parses_array_of_bulk_strings() {
@@ -250,11 +259,9 @@ mod test {
 
     #[test]
     fn into_args_rejects_non_bulk_elements() {
-        assert!(
-            RespBody::Array(Some(vec![RespBody::Integer(1)]))
-                .into_args()
-                .is_none()
-        );
+        assert!(RespBody::Array(Some(vec![RespBody::Integer(1)]))
+            .into_args()
+            .is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{parse_ttl, CommandError, HandleCmdResult},
+    command::common::{parse_ttl, HandleCmdResult},
     db::{Db, Key},
     resp::{Reply, RespBody},
 };
@@ -36,6 +36,7 @@ pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::command::common::CommandError;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
