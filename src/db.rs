@@ -26,11 +26,15 @@ pub enum Object {
 }
 
 impl Object {
+    pub const STRING: &'static str = "string";
+    pub const LIST: &'static str = "list";
+    pub const STREAM: &'static str = "stream";
+
     pub const fn type_name(&self) -> &'static str {
         match self {
-            Self::String(_) => "string",
-            Self::List(_) => "list",
-            Self::Stream(_) => "stream",
+            Self::String(_) => Self::STRING,
+            Self::List(_) => Self::LIST,
+            Self::Stream(_) => Self::STREAM,
         }
     }
 }
@@ -69,8 +73,8 @@ impl ClientWatch {
         self.dirty
     }
 
-    fn remove(&mut self) -> Option<HashSet<Key>> {
-        Some(mem::take(&mut self.keys))
+    fn remove(&mut self) -> HashSet<Key> {
+        mem::take(&mut self.keys)
     }
 }
 
@@ -91,6 +95,10 @@ pub struct Db {
 }
 
 impl Db {
+    // ---------------------------------------------------------------
+    // Constructor
+    // ---------------------------------------------------------------
+
     pub fn create(realtime_ms: Duration) -> Self {
         debug!("db initialized");
         Self {
@@ -119,7 +127,7 @@ impl Db {
         match self.keyspace.get(key) {
             None => Ok(None),
             Some(Object::String(value)) => Ok(Some(value)),
-            Some(_) => Err(CommandError::WrongType("string".into())),
+            Some(_) => Err(CommandError::WrongType(Object::STRING.into())),
         }
     }
 
@@ -160,7 +168,7 @@ impl Db {
         match self.keyspace.get(key) {
             None => Ok(None),
             Some(Object::List(list)) => Ok(Some(list)),
-            Some(_) => Err(CommandError::WrongType("list".into())),
+            Some(_) => Err(CommandError::WrongType(Object::LIST.into())),
         }
     }
 
@@ -171,7 +179,7 @@ impl Db {
         match self.keyspace.get_mut(key) {
             None => Ok(None),
             Some(Object::List(list)) => Ok(Some(list)),
-            Some(_) => Err(CommandError::WrongType("list".into())),
+            Some(_) => Err(CommandError::WrongType(Object::LIST.into())),
         }
     }
 
@@ -183,7 +191,16 @@ impl Db {
             .or_insert_with(|| Object::List(VecDeque::new()))
         {
             Object::List(list) => Ok(list),
-            _ => Err(CommandError::WrongType("list".into())),
+            _ => Err(CommandError::WrongType(Object::LIST.into())),
+        }
+    }
+
+    // A list mutation only needs to nudge the outbox if someone is actually
+    // blocked on this key waiting for it.
+    fn notify_list_waiters(&mut self, key: Key) {
+        if self.list_waiters.contains_key(&key) {
+            debug!(%key, "queuing outbox wakeup");
+            self.outbox.push(key);
         }
     }
 
@@ -233,10 +250,7 @@ impl Db {
 
         let len = list.len() as i64; // ends the borrow before we touch self below
 
-        if self.list_waiters.contains_key(&key) {
-            debug!(%key, "adding outbox");
-            self.outbox.push(key);
-        }
+        self.notify_list_waiters(key);
 
         Ok(len)
     }
@@ -247,10 +261,7 @@ impl Db {
         list.extend(elems);
         let len = list.len() as i64; // ends the borrow before we touch self below
 
-        if self.list_waiters.contains_key(&key) {
-            debug!(%key, "adding outbox");
-            self.outbox.push(key);
-        }
+        self.notify_list_waiters(key);
         Ok(len)
     }
 
@@ -304,14 +315,14 @@ impl Db {
     // Stream ops
     // ---------------------------------------------------------------
 
-    pub fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
+    fn as_stream(&mut self, key: &Key) -> Result<Option<&Stream>, CommandError> {
         if self.expire_clean(key) {
             return Ok(None);
         }
         match self.keyspace.get(key) {
             None => Ok(None),
             Some(Object::Stream(stream)) => Ok(Some(stream)),
-            Some(_) => Err(CommandError::WrongType("stream".into())),
+            Some(_) => Err(CommandError::WrongType(Object::STREAM.into())),
         }
     }
 
@@ -322,7 +333,7 @@ impl Db {
             .or_insert_with(|| Object::Stream(Stream::new()))
         {
             Object::Stream(stream) => Ok(stream),
-            _ => Err(CommandError::WrongType("stream".into())),
+            _ => Err(CommandError::WrongType(Object::STREAM.into())),
         }
     }
 
@@ -442,7 +453,7 @@ impl Db {
     // Watcher ops (WATCH / MULTI dirty-tracking)
     // ---------------------------------------------------------------
 
-    fn get_or_create_client_watchers(&mut self, client_id: ClientId) -> &mut ClientWatch {
+    fn client_watch_or_create(&mut self, client_id: ClientId) -> &mut ClientWatch {
         self.client_watches
             .entry(client_id)
             .or_insert_with(ClientWatch::new)
@@ -450,8 +461,7 @@ impl Db {
 
     pub fn add_watchers(&mut self, keys: Vec<Key>, client_id: ClientId) {
         for key in keys {
-            self.get_or_create_client_watchers(client_id)
-                .add(key.clone());
+            self.client_watch_or_create(client_id).add(key.clone());
             self.key_watchers.entry(key).or_default().insert(client_id);
         }
     }
@@ -475,7 +485,7 @@ impl Db {
 
     pub fn remove_watcher(&mut self, client_id: ClientId) {
         if let Some(mut watch) = self.client_watches.remove(&client_id) {
-            let keys = watch.remove().unwrap_or_default();
+            let keys = watch.remove();
             for key in keys {
                 if let Some(watchers) = self.key_watchers.get_mut(&key) {
                     watchers.remove(&client_id);
@@ -505,6 +515,7 @@ impl Db {
                 if let Some(value) = timeout {
                     is_expired = *value <= date_now;
                     if is_expired {
+                        debug!(?client_id, "blpop waiter timed out");
                         out.insert(*client_id, RespBody::Array(None));
                     } else {
                         let deadline = (*value).checked_sub(date_now).expect(
@@ -542,6 +553,7 @@ impl Db {
                 let item = list.pop_front().expect(
                     "list non-empty: checked via list.is_empty() above; only waiters is touched in between, list is untouched until this pop",
                 );
+                debug!(?client_id, %key, "delivering to blpop waiter");
                 out.insert(
                     client_id,
                     RespBody::Array(Some(vec![
@@ -572,11 +584,13 @@ impl Db {
             .into_iter()
             .filter_map(|wait| {
                 if let Ok(Some(resp)) = self.xread_snapshot(&wait.positions) {
+                    debug!(client_id = ?wait.client_id, "delivering to xread waiter");
                     out.insert(wait.client_id, resp);
                     return None;
                 }
                 if let Some(deadline) = wait.deadline {
                     if deadline <= date_now {
+                        debug!(client_id = ?wait.client_id, "xread waiter timed out");
                         out.insert(wait.client_id, RespBody::Array(None));
                         return None;
                     }
@@ -898,5 +912,68 @@ mod test {
             panic!("expected an array reply");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn xread_wait_delivers_when_a_later_write_arrives() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+        let client_id = ClientId::new(1);
+
+        // watching from the very start of the stream (still empty at this point).
+        db.xread_wait(client_id, vec![(key.clone(), StreamId::ZERO)], None);
+
+        db.stream_add(
+            &key,
+            StreamIdSpec::Auto,
+            vec![(b"field".to_vec().into(), b"value".to_vec().into())],
+        )
+        .unwrap();
+
+        let HandleWaitersResult { mut replies, .. } = db.handle_stream_waiters();
+        let resp = replies.remove(&client_id).unwrap();
+        assert!(matches!(resp, RespBody::Array(Some(_))));
+    }
+
+    #[test]
+    fn xread_wait_times_out_and_replies_with_null_array() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mystream".to_vec().into();
+        let client_id = ClientId::new(1);
+        let now = db.realtime_ms();
+
+        db.xread_wait(
+            client_id,
+            vec![(key, StreamId::ZERO)],
+            Some(Duration::from_millis(1)),
+        );
+        db.update_time(now + Duration::from_millis(2));
+
+        let HandleWaitersResult { mut replies, .. } = db.handle_stream_waiters();
+        let resp = replies.remove(&client_id).unwrap();
+        assert!(matches!(resp, RespBody::Array(None)));
+    }
+
+    #[test]
+    fn remove_watcher_stops_future_dirtying_without_affecting_other_watchers() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"shared".to_vec().into();
+        let watcher_a = ClientId::new(1);
+        let watcher_b = ClientId::new(2);
+
+        db.add_watchers(vec![key.clone()], watcher_a);
+        db.add_watchers(vec![key.clone()], watcher_b);
+
+        db.remove_watcher(watcher_a);
+
+        // A write after A unwatched should still dirty B, and A's removal
+        // must not have wiped out B's registration on the same key.
+        db.setex(key, b"value".to_vec().into(), None);
+
+        assert!(!db.is_dirty(watcher_a));
+        assert!(db.is_dirty(watcher_b));
     }
 }
