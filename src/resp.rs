@@ -52,14 +52,25 @@ impl From<&str> for RespBody {
     }
 }
 
+impl From<Vec<u8>> for RespBody {
+    fn from(v: Vec<u8>) -> Self {
+        Self::Bulk(Some(v))
+    }
+}
+
 impl<T: Into<RespBody>> FromIterator<T> for RespBody {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         RespBody::Array(Some(iter.into_iter().map(Into::into).collect()))
     }
 }
 
+pub enum Propagate {
+    Skip,
+    Replicate,
+}
+
 pub enum Reply {
-    Now(RespBody),
+    Now(RespBody, Propagate),
     Rdb(RespBody, RespBody),
     StartTransaction,
     AddTransaction(RespBody),
@@ -68,9 +79,12 @@ pub enum Reply {
     Blocked,
 }
 
-impl From<RespBody> for Reply {
-    fn from(resp: RespBody) -> Self {
-        Reply::Now(resp)
+impl Reply {
+    pub fn readonly(body: RespBody) -> Reply {
+        Reply::Now(body, Propagate::Skip)
+    }
+    pub fn write(body: RespBody) -> Reply {
+        Reply::Now(body, Propagate::Replicate)
     }
 }
 

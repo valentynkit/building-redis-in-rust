@@ -3,8 +3,8 @@ use std::time::Duration;
 use crate::{
     client::ClientId,
     command::{
-        common::{get_ttl, ExpCmd, HandleCmdResult},
         CommandError,
+        common::{ExpCmd, HandleCmdResult, get_ttl},
     },
     db::{Db, Key, Value},
     resp::{Reply, RespBody},
@@ -23,7 +23,7 @@ pub fn push(db: &mut Db, side: &Side, key: &[u8], elems: &[Vec<u8>]) -> HandleCm
         Side::Back => db.list_append(key, elems)?,
     };
 
-    Ok(RespBody::Integer(out).into())
+    Ok(Reply::write(RespBody::Integer(out)))
 }
 
 pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> HandleCmdResult {
@@ -46,13 +46,13 @@ pub fn lrange(db: &mut Db, key: &[u8], num_from: &[u8], num_to: &[u8]) -> Handle
         .into_iter()
         .collect::<RespBody>();
 
-    Ok(resp.into())
+    Ok(Reply::readonly(resp))
 }
 
 pub fn llen(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let out = db.list_len(key)?;
-    Ok(RespBody::Integer(out).into())
+    Ok(Reply::readonly(RespBody::Integer(out)))
 }
 
 // TODO: Do we need to handle the case when the len is 1, which means we should use Bulk resp
@@ -75,7 +75,7 @@ pub fn blpop(
         .blpop(key.clone(), timeout, client_id)?
         .map(|item| RespBody::Array(Some(vec![RespBody::from(key), RespBody::from(item)]))); // None → key absent → caller writes $-1
 
-    resp.map_or(Ok(Reply::Blocked), |resp| Ok(resp.into()))
+    resp.map_or(Ok(Reply::Blocked), |resp| Ok(Reply::write(resp)))
 }
 
 pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
@@ -105,7 +105,7 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
             .collect::<RespBody>()
     };
 
-    Ok(resp.into())
+    Ok(Reply::write(resp))
 }
 
 #[cfg(test)]

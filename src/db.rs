@@ -277,8 +277,6 @@ impl ClientWatch {
 pub struct Db {
     keyspace: HashMap<Key, Object>,
     expires: HashMap<Key, Duration>,
-    // TODO: maybe extend VecDequeu<(ClientId, Duration) and than in server we could compare current
-    // time, if timeout, we could send null or whatever response to this client.
     waiters: HashMap<Key, Waiters>,
     // double side structure watchers <-> clients_watchers
     watchers: HashMap<Key, HashSet<ClientId>>,
@@ -606,9 +604,6 @@ impl Db {
         let list = self.as_list(&key)?;
 
         Ok(list.map_or(0, |list| list.len() as i64))
-    }
-    pub fn wait(&mut self, keys: Vec<Key>, cur_client: ClientId) -> Result<(), CommandError> {
-        todo!()
     }
 
     pub fn blpop(

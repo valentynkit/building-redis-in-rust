@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead};
 use std::iter;
 use std::os::fd::AsRawFd;
@@ -13,10 +13,10 @@ use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
+use crate::Cli;
 use crate::client::{Client, ClientId, ClientRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::{Cli, resp};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
@@ -94,7 +94,8 @@ impl ServerInfo {
 pub struct Server {
     listener: TcpListener,
     clients: HashMap<Token, Client>,
-    slaves: Vec<Client>,
+    // TODO hashset?
+    slaves: HashSet<Token>,
     master_link: Option<Client>,
     next_client_id: usize,
     poll: Poll,
@@ -149,7 +150,7 @@ impl Server {
         Ok(Self {
             listener,
             clients: HashMap::new(),
-            slaves: vec![],
+            slaves: HashSet::new(),
             next_client_id: 0,
             poll,
             db,
@@ -305,12 +306,27 @@ impl Server {
 
     #[instrument(skip(self))]
     fn service_client(&mut self, token: Token) {
-        if let Some(client) = self.clients.get_mut(&token)
-            && matches!(client.on_readable(&mut self.db), Disposition::Drop)
-        {
-            self.db.remove_watcher(ClientId::new(token.0));
-            warn!("removing client");
-            self.clients.remove(&token);
+        if let Some(client) = self.clients.get_mut(&token) {
+            let (disposition, to_propogate) = client.on_readable(&mut self.db);
+            if matches!(disposition, Disposition::Drop) {
+                self.db.remove_watcher(ClientId::new(token.0));
+                warn!("removing client");
+                self.clients.remove(&token);
+                self.slaves.remove(&token);
+                return;
+            }
+            if client.role() == ClientRole::Slave && !self.slaves.contains(&token) {
+                self.slaves.insert(token);
+            }
+
+            for cmd in &to_propogate {
+                for token in &mut self.slaves.iter() {
+                    if let Some(slave) = self.clients.get_mut(token) {
+                        slave.write_out(cmd);
+                        slave.flush();
+                    }
+                }
+            }
         }
     }
 

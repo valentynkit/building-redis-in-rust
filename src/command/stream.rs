@@ -64,10 +64,10 @@ pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdRes
         .collect::<Result<_, CommandError>>()?;
 
     if let Some(resp) = db.xread_snapshot(&watch)? {
-        return Ok(resp.into());
+        return Ok(Reply::readonly(resp));
     }
     let reply = match block {
-        BlockMode::NotBlocking => Reply::Now(RespBody::Array(None)),
+        BlockMode::NotBlocking => Reply::readonly(RespBody::Array(None)),
         BlockMode::Forever => {
             db.xread_wait(client_id, watch, None);
             Reply::Blocked
@@ -105,7 +105,7 @@ pub fn xrange(db: &mut Db, key: &[u8], start: &[u8], end: &[u8]) -> HandleCmdRes
         })
         .collect::<RespBody>();
 
-    Ok(entries.into())
+    Ok(Reply::readonly(entries))
 }
 
 pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdResult {
@@ -124,5 +124,5 @@ pub fn xadd(db: &mut Db, key: &[u8], id: &[u8], elems: &[Vec<u8>]) -> HandleCmdR
         ));
     }
     let id = db.stream_add(&key, id_spec, kv_arr)?;
-    Ok(RespBody::from(id).into())
+    Ok(Reply::write(RespBody::from(id)))
 }

@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{parse_ttl, CommandError, HandleCmdResult},
+    command::common::{CommandError, HandleCmdResult, parse_ttl},
     db::{Db, Key},
     resp::{Reply, RespBody},
 };
@@ -7,7 +7,7 @@ use crate::{
 pub fn get(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let opt_value = db.as_string(&key)?.map(Into::into); // None → key absent → caller writes $-1
-    Ok(RespBody::Bulk(opt_value).into())
+    Ok(Reply::readonly(RespBody::Bulk(opt_value)))
 }
 
 pub fn set(
@@ -20,7 +20,7 @@ pub fn set(
     let expiry = parse_ttl(exp_cmd, exp)?.map(|ttl| db.realtime_ms() + ttl);
 
     db.setex(key.into(), value.into(), expiry);
-    Ok(RespBody::new_ok().into())
+    Ok(Reply::write(RespBody::new_ok()))
 }
 pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
     let key: Key = key.into();
@@ -31,13 +31,13 @@ pub fn cmd_type(db: &mut Db, key: &[u8]) -> Reply {
         |obj| RespBody::Simple(obj.type_name().into()),
     );
 
-    resp.into()
+    Reply::readonly(resp)
 }
 
 pub fn incr(db: &mut Db, key: &[u8]) -> HandleCmdResult {
     let key: Key = key.into();
     let result = db.incr(key)?;
-    Ok(RespBody::Integer(result).into())
+    Ok(Reply::write(RespBody::Integer(result)))
 }
 
 #[cfg(test)]
