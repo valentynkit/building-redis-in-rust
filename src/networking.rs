@@ -243,7 +243,7 @@ impl Server {
         self.slave_ping()?;
         self.slave_replconf(port)?;
         self.slave_psync()?;
-
+        info!("handshake successfully finished, client is ready");
         Ok(())
     }
 
