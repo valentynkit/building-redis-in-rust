@@ -8,15 +8,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use mio::net::TcpListener;
+use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
+use crate::Cli;
 use crate::client::{Client, ClientId, ClientRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::Cli;
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MAX_EVENTS: usize = 128;
@@ -274,32 +274,41 @@ impl Server {
             }
         }
     }
+
+    fn init_client(&mut self, mut stream: TcpStream, c_token: Token) -> Option<Client> {
+        if let Err(error) = self
+            .poll
+            .registry()
+            .register(&mut stream, c_token, Interest::READABLE)
+        {
+            error!(?c_token, ?error, "registration failed");
+            return None;
+        }
+
+        let server_info = Rc::clone(&self.server_info);
+        let client = Client::new(
+            stream,
+            ClientId::new(c_token.0),
+            ClientRole::Normal,
+            server_info,
+        );
+        Some(client)
+    }
+
     #[instrument(skip(self))]
     fn accept_client(&mut self) {
         loop {
             match self.listener.accept() {
-                Ok((mut stream, addr)) => {
+                Ok((stream, addr)) => {
                     let c_token = Token(self.get_increased_id());
-
-                    if let Err(error) =
-                        self.poll
-                            .registry()
-                            .register(&mut stream, c_token, Interest::READABLE)
-                    {
-                        error!(?c_token, ?error, "registration failed");
-                        continue;
-                    }
-
                     info!(?addr, ?c_token, "connected client");
-                    let server_info = Rc::clone(&self.server_info);
-                    let client = Client::new(
-                        stream,
-                        ClientId::new(c_token.0),
-                        ClientRole::Normal,
-                        server_info,
-                    );
+                    let client = self
+                        .init_client(stream, c_token)
+                        .expect("client initialization should succedd");
+
                     self.clients.insert(c_token, client);
                 }
+
                 Err(e) if would_block(&e) => break,
                 Err(e) if interrupted(&e) => {}
                 Err(error) => {
