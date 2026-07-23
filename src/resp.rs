@@ -4,29 +4,27 @@ use tracing::trace;
 
 use crate::command::common::CommandError;
 
-pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
+pub fn parse_resp(buf: &[u8]) -> Option<Frame> {
     if buf.first()? != &b'*' {
+        trace!("malformed resp frame: does not start with '*'");
         return None;
     }
 
-    let get_position = |inner_buf: &[u8], ch: u8| inner_buf.iter().position(|&b| b == ch);
-    let get_part_end_position = |inner_buf: &[u8]| get_position(inner_buf, b'\r');
-    let get_dollar_sign_position = |inner_buf: &[u8]| get_position(inner_buf, b'$');
-    let parse_number = |inner_buf: &[u8]| str::from_utf8(inner_buf).ok()?.parse().ok();
-    let validate_part_end = |inner_buf: &[u8]| inner_buf == [b'\r', b'\n'];
-    let mut cursor = get_part_end_position(&buf[1..])? + 1;
-    if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+    let mut cursor = find_from(buf, 1, b'\r')?;
+    if !is_crlf(buf.get(cursor..cursor + 2)?) {
         trace!(cursor, "malformed resp frame: array header missing CRLF");
         return None;
     }
     let n_elems: usize = parse_number(&buf[1..cursor])?;
+    cursor += 2;
+
     let mut output: Vec<Vec<u8>> = vec![];
     for _ in 0..n_elems {
-        let num_start = cursor + get_dollar_sign_position(&buf[cursor..])? + 1;
         // "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
-        cursor = num_start + get_part_end_position(&buf[num_start + 1..])? + 1;
+        let num_start = find_from(buf, cursor, b'$')? + 1;
+        cursor = find_from(buf, num_start, b'\r')?;
         let part_size = parse_number(&buf[num_start..cursor])?;
-        if !validate_part_end(buf.get(cursor..cursor + 2)?) {
+        if !is_crlf(buf.get(cursor..cursor + 2)?) {
             trace!(cursor, "malformed resp frame: bulk header missing CRLF");
             return None;
         }
@@ -40,7 +38,7 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
         cursor = data_end;
 
         let part_end = buf.get(cursor..cursor + 2)?;
-        if !validate_part_end(part_end) {
+        if !is_crlf(part_end) {
             trace!(
                 cursor,
                 ?part_end,
@@ -52,7 +50,23 @@ pub fn parse_resp(buf: &[u8]) -> Option<Resp> {
         output.push(part_slice.to_vec());
     }
 
-    Some(Resp::new(output, cursor))
+    Some(Frame::new(output, cursor))
+}
+
+/// Absolute index of the first `byte` in `buf`, searching from `start` onward.
+fn find_from(buf: &[u8], start: usize, byte: u8) -> Option<usize> {
+    buf.get(start..)?
+        .iter()
+        .position(|&b| b == byte)
+        .map(|pos| start + pos)
+}
+
+fn parse_number(buf: &[u8]) -> Option<usize> {
+    str::from_utf8(buf).ok()?.parse().ok()
+}
+
+fn is_crlf(buf: &[u8]) -> bool {
+    buf == [b'\r', b'\n']
 }
 
 pub enum RespBody {
@@ -122,56 +136,6 @@ impl<T: Into<RespBody>> FromIterator<T> for RespBody {
     }
 }
 
-pub enum Propagate {
-    Skip,
-    Replicate,
-}
-
-pub enum Reply {
-    Now(RespBody, Propagate),
-    Rdb(RespBody, RespBody),
-    StartTransaction,
-    AddTransaction(RespBody),
-    ExecTransaction,
-    DiscardTransaction(Option<RespBody>),
-    Blocked,
-}
-
-impl Reply {
-    pub fn readonly(body: RespBody) -> Reply {
-        Reply::Now(body, Propagate::Skip)
-    }
-    pub fn write(body: RespBody) -> Reply {
-        Reply::Now(body, Propagate::Replicate)
-    }
-}
-
-pub struct Resp {
-    body: RespBody,
-    consumed: usize,
-}
-
-impl Resp {
-    fn new(items: Vec<Vec<u8>>, consumed: usize) -> Self {
-        let resp_arr = items
-            .into_iter()
-            .map(|item| RespBody::Bulk(Some(item)))
-            .collect::<Vec<RespBody>>();
-
-        Self {
-            body: RespBody::Array(Some(resp_arr)),
-            consumed,
-        }
-    }
-    pub const fn consumed(&self) -> usize {
-        self.consumed
-    }
-
-    pub fn body(self) -> RespBody {
-        self.body
-    }
-}
-
 const END_OF_LINE: &[u8; 2] = b"\r\n";
 
 // *{v.len()}\r\n then recurse e.encode(out) per element
@@ -226,6 +190,56 @@ fn write_bulk_string(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(END_OF_LINE);
 }
 
+pub enum Propagate {
+    Skip,
+    Replicate,
+}
+
+pub enum Reply {
+    Now(RespBody, Propagate),
+    Rdb(RespBody, RespBody),
+    StartTransaction,
+    AddTransaction(RespBody),
+    ExecTransaction,
+    DiscardTransaction(Option<RespBody>),
+    Blocked,
+}
+
+impl Reply {
+    pub fn readonly(body: RespBody) -> Reply {
+        Reply::Now(body, Propagate::Skip)
+    }
+    pub fn write(body: RespBody) -> Reply {
+        Reply::Now(body, Propagate::Replicate)
+    }
+}
+
+pub struct Frame {
+    body: RespBody,
+    consumed: usize,
+}
+
+impl Frame {
+    fn new(items: Vec<Vec<u8>>, consumed: usize) -> Self {
+        let resp_arr = items
+            .into_iter()
+            .map(|item| RespBody::Bulk(Some(item)))
+            .collect::<Vec<RespBody>>();
+
+        Self {
+            body: RespBody::Array(Some(resp_arr)),
+            consumed,
+        }
+    }
+    pub const fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    pub fn body(self) -> RespBody {
+        self.body
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
@@ -274,6 +288,14 @@ mod test {
     fn rejects_malformed_bulk_header() {
         // "\r" not followed by "\n" right after a bulk string's declared length.
         assert!(parse_resp(b"*1\r\n$4\rXPING\r\n").is_none());
+    }
+
+    #[test]
+    fn rejects_wrong_bytes_where_trailing_crlf_belongs() {
+        // Bytes are present (unlike incomplete_frame_is_none's truncated cases),
+        // they're just not "\r\n" — this is the one case that actually exercises
+        // the trailing-CRLF validate_part_end-false branch, not a too-few-bytes `?`.
+        assert!(parse_resp(b"*1\r\n$4\r\nPINGXY").is_none());
     }
 
     #[test]
