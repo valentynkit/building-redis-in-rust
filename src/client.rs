@@ -220,12 +220,28 @@ impl Client {
     }
 
     pub(crate) fn flush(&mut self) -> Disposition {
-        if let Err(e) = self.stream.write_all(&self.outbuf) {
-            error!(?e, "flush failed");
-            return Disposition::Drop;
-        }
         debug!(wire_out = %self.outbuf.escape_ascii(), "flushing to client");
-        self.outbuf.clear();
+        let mut written = 0;
+        while written < self.outbuf.len() {
+            match self.stream.write(&self.outbuf[written..]) {
+                Ok(0) => {
+                    error!("flush wrote 0 bytes; dropping client");
+                    return Disposition::Drop;
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // WouldBlock is backpressure, not a fault: keep the unsent tail
+                // and stay alive. TODO: re-flush on writable readiness instead of
+                // waiting for this client's next event (needs WRITABLE interest).
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    error!(?e, "flush failed");
+                    return Disposition::Drop;
+                }
+            }
+        }
+        // Drop only what actually went out — re-flushing must not resend it.
+        self.outbuf.drain(..written);
         Disposition::Keep
     }
 
