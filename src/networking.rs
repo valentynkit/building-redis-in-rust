@@ -225,7 +225,7 @@ impl Server {
             // Long lived replication link for slave -> master
             let stream = mio::net::TcpStream::from_std(stream);
 
-            let c_token = Token(self.get_increased_id());
+            let c_token = MASTER;
             let client = self
                 .register_client(stream, c_token, ClientRole::Master)
                 .expect("client initialization should succedd");
@@ -289,7 +289,7 @@ impl Server {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
-                    let c_token = MASTER;
+                    let c_token = Token(self.get_increased_id());
                     info!(?addr, ?c_token, "connected client");
                     let client = self
                         .register_client(stream, c_token, ClientRole::Normal)
