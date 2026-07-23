@@ -1,5 +1,5 @@
 use mio::net::TcpStream;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
@@ -62,7 +62,7 @@ pub struct Client {
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
-    // this field is used ONLY on master which has finished handshake with slave, to propogate the
+    // this field is used ONLY on master which has finished handshake with slave, to propagate the
     // need for creating a copy of this client or moving it?
 }
 
@@ -180,22 +180,22 @@ impl Client {
     pub fn on_readable(&mut self, db: &mut Db) -> (Disposition, Vec<RespBody>) {
         let mut stream = &self.stream;
         let mut buf = [0u8; READ_BUF];
-        let mut to_propogate: Vec<RespBody> = vec![];
+        let mut to_propagate: Vec<RespBody> = vec![];
         let disposition = match stream.read(&mut buf) {
             // EOF: peer closed cleanly
             Ok(0) => {
-                warn!("client disconnected");
+                info!(client_id = ?self.id, "client disconnected");
                 Disposition::Drop
             }
             // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
-                to_propogate.extend(self.consume(db));
+                to_propagate.extend(self.consume(db));
 
                 match self.role {
                     ClientRole::Normal => self.flush(),
                     ClientRole::Master => {
-                        // TODO: I think we should move the slave offset withotu replying to client, and
+                        // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         // todo!()
                         Disposition::Keep
@@ -217,14 +217,14 @@ impl Client {
             }
         };
 
-        (disposition, to_propogate)
+        (disposition, to_propagate)
     }
 
     pub fn write_out(&mut self, resp: &RespBody) {
         resp.encode(&mut self.outbuf);
     }
 
-    // TODO: improve this STATE machinge and state transitions
+    // TODO: improve this state machine and state transitions
     fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> ReplyOutcome {
         let mut replies = vec![];
         let mut forwards = vec![];
@@ -243,7 +243,7 @@ impl Client {
             Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
             Reply::Blocked => {}
             Reply::Rdb(sync, rdb) => {
-                warn!("rdb finished handshake on master side");
+                info!(client_id = ?self.id, "replica attached: handshake finished on master side");
                 self.promote_to_slave();
                 replies.push(sync);
                 replies.push(rdb);
@@ -289,9 +289,11 @@ impl Client {
                 match self.role {
                     ClientRole::Normal | ClientRole::Slave => self.write_out(&resp),
                     ClientRole::Master => {
-                        // TODO: I think we should move the slave offset withotu replying to client, and
+                        // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
-                        warn!("master (on slave) slave should update it offset etc..");
+                        trace!(
+                            "replicated write applied from master; slave offset advance pending"
+                        );
                     }
                 }
             }
@@ -299,13 +301,12 @@ impl Client {
         out
     }
 
-    #[instrument(skip(self))]
     pub fn flush(&mut self) -> Disposition {
         if let Err(e) = self.stream.write_all(&self.outbuf) {
             error!(?e, "flush failed");
             return Disposition::Drop;
         }
-        debug!(flushing = %self.outbuf.escape_ascii(),"flushing to client");
+        debug!(wire_out = %self.outbuf.escape_ascii(), "flushing to client");
         self.outbuf.clear();
         Disposition::Keep
     }
