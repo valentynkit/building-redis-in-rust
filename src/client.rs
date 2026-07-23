@@ -107,6 +107,7 @@ impl Client {
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         // todo!()
+                        info!("slave received from master");
                         Disposition::Keep
                     }
                     ClientRole::Slave => {

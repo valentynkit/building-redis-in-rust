@@ -8,17 +8,19 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use clap::error;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
-use crate::Cli;
 use crate::client::{Client, ClientId, ClientRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
+use crate::{Cli, client};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
+const MASTER: Token = Token(1);
 const MAX_EVENTS: usize = 128;
 
 pub struct StartTime {
@@ -151,7 +153,7 @@ impl Server {
             listener,
             clients: HashMap::new(),
             slaves: HashSet::new(),
-            next_client_id: 0,
+            next_client_id: 1,
             poll,
             db,
             cronloops: 0,
@@ -251,10 +253,11 @@ impl Server {
             self.set_current_time()?;
             for event in &events {
                 if event.is_readable() {
-                    if event.token() == LISTENER {
-                        self.accept_client();
-                    } else {
-                        self.service_client(event.token());
+                    let token = event.token();
+                    match token {
+                        LISTENER => self.accept_client(),
+                        MASTER => self.service_master(),
+                        _ => self.service_client(token),
                     }
                 }
             }
@@ -286,7 +289,7 @@ impl Server {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
-                    let c_token = Token(self.get_increased_id());
+                    let c_token = MASTER;
                     info!(?addr, ?c_token, "connected client");
                     let client = self
                         .register_client(stream, c_token, ClientRole::Normal)
@@ -305,6 +308,18 @@ impl Server {
         }
     }
 
+    #[instrument(skip(self))]
+    fn service_master(&mut self) {
+        if let Some(master) = &mut self.master_link {
+            let (disposition, _) = master.on_readable(&mut self.db);
+
+            if matches!(disposition, Disposition::Drop) {
+                error!("master link was dropped");
+            }
+        } else {
+            error!("master_link empty");
+        }
+    }
     #[instrument(skip(self, token), fields(client_id = token.0))]
     fn service_client(&mut self, token: Token) {
         if let Some(client) = self.clients.get_mut(&token) {
