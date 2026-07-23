@@ -93,7 +93,7 @@ impl Client {
         let disposition = match stream.read(&mut buf) {
             // EOF: peer closed cleanly
             Ok(0) => {
-                info!(client_id = ?self.id, "client disconnected");
+                info!("client disconnected");
                 Disposition::Drop
             }
             // TODO extract logic
@@ -198,7 +198,7 @@ impl Client {
             Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
             Reply::Blocked => {}
             Reply::Rdb(sync, rdb) => {
-                info!(client_id = ?self.id, "replica attached: handshake finished on master side");
+                info!("replica attached: handshake finished on master side");
                 self.promote_to_slave();
                 replies.push(sync);
                 replies.push(rdb);

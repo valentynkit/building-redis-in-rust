@@ -310,7 +310,7 @@ impl Server {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, token), fields(client_id = token.0))]
     fn service_client(&mut self, token: Token) {
         if let Some(client) = self.clients.get_mut(&token) {
             let (disposition, to_propogate) = client.on_readable(&mut self.db);
