@@ -62,8 +62,6 @@ pub struct Client {
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
-    // this field is used ONLY on master which has finished handshake with slave, to propagate the
-    // need for creating a copy of this client or moving it?
 }
 
 impl Client {
@@ -131,7 +129,7 @@ impl Client {
     }
 
     /// Drain every complete command from inbuf, then flush replies in one write.
-    /// returns requset to replicate to slaves
+    /// Returns the write commands to replicate to slaves.
     fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
         let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
@@ -192,7 +190,6 @@ impl Client {
         let mut forwards = vec![];
         match reply {
             Reply::Now(resp, _) => {
-                // self.make_normal_mode();
                 replies.push(resp);
             }
             Reply::StartTransaction => replies.push(self.start_transaction()),
@@ -228,13 +225,11 @@ impl Client {
         Disposition::Keep
     }
 
+    /// Only reached from Normal mode: a nested MULTI is rejected in the command
+    /// layer before it ever gets here, so there's no in-transaction case to guard.
     pub fn start_transaction(&mut self) -> RespBody {
-        if self.mode == ClientMode::Transaction {
-            RespBody::new_error(&CommandError::ExecTransaction)
-        } else {
-            self.mode = ClientMode::Transaction;
-            RespBody::new_ok()
-        }
+        self.mode = ClientMode::Transaction;
+        RespBody::new_ok()
     }
 
     pub fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
