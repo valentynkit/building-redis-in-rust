@@ -67,97 +67,6 @@ pub struct Client {
 }
 
 impl Client {
-    pub(crate) fn read_line(&mut self) -> io::Result<String> {
-        let mut reader = io::BufReader::new(&self.stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        Ok(line)
-    }
-
-    fn clear_queue(&mut self) {
-        self.queue = VecDeque::new();
-    }
-    pub const fn role(&self) -> ClientRole {
-        self.role
-    }
-
-    pub fn promote_to_slave(&mut self) {
-        self.role = ClientRole::Slave;
-    }
-
-    pub const fn make_normal_mode(&mut self) {
-        self.mode = ClientMode::Normal;
-    }
-
-    pub fn start_transaction(&mut self) -> RespBody {
-        if self.mode == ClientMode::Transaction {
-            RespBody::new_error(&CommandError::ExecTransaction)
-        } else {
-            self.mode = ClientMode::Transaction;
-            RespBody::new_ok()
-        }
-    }
-
-    /// Runs every queued command for real. Returns the EXEC reply array plus
-    /// any forwards those commands produced — queued writes execute here for
-    /// the first time, so this is the only place their propagation is decided.
-    pub fn exec_transaction(&mut self, db: &mut Db) -> (RespBody, Vec<RespBody>) {
-        if self.mode != ClientMode::Transaction {
-            (RespBody::new_error(&CommandError::ExecTransaction), vec![])
-        } else if self.queue.is_empty() {
-            self.make_normal_mode();
-            db.remove_watcher(self.id);
-            (RespBody::Array(Some(vec![])), vec![])
-        } else {
-            self.make_normal_mode();
-            db.remove_watcher(self.id);
-            let mut out: Vec<RespBody> = vec![];
-            let mut forwards: Vec<RespBody> = vec![];
-            while let Some(item) = self.queue.pop_back() {
-                let reply = self.process_request(db, item);
-
-                let resp_arr: Vec<RespBody> = match reply {
-                    Ok((reply, forward)) => {
-                        if let Some(forward) = forward {
-                            forwards.push(forward);
-                        }
-                        self.post_process_success_request(db, reply).replies
-                    }
-                    Err(err) => {
-                        debug!(?err, "command error");
-                        vec![RespBody::new_error(&err)]
-                    }
-                };
-
-                for resp in resp_arr {
-                    out.push(resp);
-                }
-            }
-
-            (RespBody::Array(Some(out)), forwards)
-        }
-    }
-
-    pub fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
-        if self.mode == ClientMode::Transaction {
-            self.queue.push_front(resp);
-            RespBody::new_queued()
-        } else {
-            RespBody::new_error(&CommandError::ExecTransaction)
-        }
-    }
-
-    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<RespBody>) -> RespBody {
-        if self.mode == ClientMode::Transaction {
-            self.make_normal_mode();
-            self.clear_queue();
-            db.remove_watcher(self.id);
-            resp.unwrap_or_else(RespBody::new_ok)
-        } else {
-            RespBody::new_error(&CommandError::DiscardTransaction)
-        }
-    }
-
     pub fn new(
         stream: TcpStream,
         id: ClientId,
@@ -220,47 +129,6 @@ impl Client {
         (disposition, to_propagate)
     }
 
-    pub fn write_out(&mut self, resp: &RespBody) {
-        resp.encode(&mut self.outbuf);
-    }
-
-    // TODO: improve this state machine and state transitions
-    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> ReplyOutcome {
-        let mut replies = vec![];
-        let mut forwards = vec![];
-        match reply {
-            Reply::Now(resp, _) => {
-                // self.make_normal_mode();
-                replies.push(resp);
-            }
-            Reply::StartTransaction => replies.push(self.start_transaction()),
-            Reply::AddTransaction(resp) => replies.push(self.add_to_transaction(resp)),
-            Reply::ExecTransaction => {
-                let (resp, exec_forwards) = self.exec_transaction(db);
-                replies.push(resp);
-                forwards.extend(exec_forwards);
-            }
-            Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
-            Reply::Blocked => {}
-            Reply::Rdb(sync, rdb) => {
-                info!(client_id = ?self.id, "replica attached: handshake finished on master side");
-                self.promote_to_slave();
-                replies.push(sync);
-                replies.push(rdb);
-            }
-        }
-        ReplyOutcome { replies, forwards }
-    }
-    fn process_request(
-        &mut self,
-        db: &mut Db,
-        frame: RespBody,
-    ) -> Result<(Reply, Option<RespBody>), CommandError> {
-        let client_info =
-            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
-        Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db))
-    }
-
     /// Drain every complete command from inbuf, then flush replies in one write.
     /// returns requset to replicate to slaves
     fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
@@ -301,6 +169,48 @@ impl Client {
         out
     }
 
+    fn process_request(
+        &mut self,
+        db: &mut Db,
+        frame: RespBody,
+    ) -> Result<(Reply, Option<RespBody>), CommandError> {
+        let client_info =
+            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
+        Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db))
+    }
+
+    // TODO: improve this state machine and state transitions
+    fn post_process_success_request(&mut self, db: &mut Db, reply: Reply) -> ReplyOutcome {
+        let mut replies = vec![];
+        let mut forwards = vec![];
+        match reply {
+            Reply::Now(resp, _) => {
+                // self.make_normal_mode();
+                replies.push(resp);
+            }
+            Reply::StartTransaction => replies.push(self.start_transaction()),
+            Reply::AddTransaction(resp) => replies.push(self.add_to_transaction(resp)),
+            Reply::ExecTransaction => {
+                let (resp, exec_forwards) = self.exec_transaction(db);
+                replies.push(resp);
+                forwards.extend(exec_forwards);
+            }
+            Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
+            Reply::Blocked => {}
+            Reply::Rdb(sync, rdb) => {
+                info!(client_id = ?self.id, "replica attached: handshake finished on master side");
+                self.promote_to_slave();
+                replies.push(sync);
+                replies.push(rdb);
+            }
+        }
+        ReplyOutcome { replies, forwards }
+    }
+
+    pub fn write_out(&mut self, resp: &RespBody) {
+        resp.encode(&mut self.outbuf);
+    }
+
     pub fn flush(&mut self) -> Disposition {
         if let Err(e) = self.stream.write_all(&self.outbuf) {
             error!(?e, "flush failed");
@@ -309,6 +219,98 @@ impl Client {
         debug!(wire_out = %self.outbuf.escape_ascii(), "flushing to client");
         self.outbuf.clear();
         Disposition::Keep
+    }
+
+    pub fn start_transaction(&mut self) -> RespBody {
+        if self.mode == ClientMode::Transaction {
+            RespBody::new_error(&CommandError::ExecTransaction)
+        } else {
+            self.mode = ClientMode::Transaction;
+            RespBody::new_ok()
+        }
+    }
+
+    pub fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
+        if self.mode == ClientMode::Transaction {
+            self.queue.push_front(resp);
+            RespBody::new_queued()
+        } else {
+            RespBody::new_error(&CommandError::ExecTransaction)
+        }
+    }
+
+    /// Runs every queued command for real. Returns the EXEC reply array plus
+    /// any forwards those commands produced — queued writes execute here for
+    /// the first time, so this is the only place their propagation is decided.
+    pub fn exec_transaction(&mut self, db: &mut Db) -> (RespBody, Vec<RespBody>) {
+        if self.mode != ClientMode::Transaction {
+            (RespBody::new_error(&CommandError::ExecTransaction), vec![])
+        } else if self.queue.is_empty() {
+            self.make_normal_mode();
+            db.remove_watcher(self.id);
+            (RespBody::Array(Some(vec![])), vec![])
+        } else {
+            self.make_normal_mode();
+            db.remove_watcher(self.id);
+            let mut out: Vec<RespBody> = vec![];
+            let mut forwards: Vec<RespBody> = vec![];
+            while let Some(item) = self.queue.pop_back() {
+                let reply = self.process_request(db, item);
+
+                let resp_arr: Vec<RespBody> = match reply {
+                    Ok((reply, forward)) => {
+                        if let Some(forward) = forward {
+                            forwards.push(forward);
+                        }
+                        self.post_process_success_request(db, reply).replies
+                    }
+                    Err(err) => {
+                        debug!(?err, "command error");
+                        vec![RespBody::new_error(&err)]
+                    }
+                };
+
+                for resp in resp_arr {
+                    out.push(resp);
+                }
+            }
+
+            (RespBody::Array(Some(out)), forwards)
+        }
+    }
+
+    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<RespBody>) -> RespBody {
+        if self.mode == ClientMode::Transaction {
+            self.make_normal_mode();
+            self.clear_queue();
+            db.remove_watcher(self.id);
+            resp.unwrap_or_else(RespBody::new_ok)
+        } else {
+            RespBody::new_error(&CommandError::DiscardTransaction)
+        }
+    }
+
+    pub const fn make_normal_mode(&mut self) {
+        self.mode = ClientMode::Normal;
+    }
+
+    fn clear_queue(&mut self) {
+        self.queue = VecDeque::new();
+    }
+
+    pub const fn role(&self) -> ClientRole {
+        self.role
+    }
+
+    pub fn promote_to_slave(&mut self) {
+        self.role = ClientRole::Slave;
+    }
+
+    pub(crate) fn read_line(&mut self) -> io::Result<String> {
+        let mut reader = io::BufReader::new(&self.stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        Ok(line)
     }
 }
 
