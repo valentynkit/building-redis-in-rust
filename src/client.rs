@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 
-pub const READ_BUF: usize = 512;
+const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
 pub enum Disposition {
     Keep,
@@ -84,7 +84,7 @@ impl Client {
     }
 
     /// Poller reported this client readable: read, parse, run, reply.
-    pub fn on_readable(&mut self, db: &mut Db) -> (Disposition, Vec<RespBody>) {
+    pub(crate) fn on_readable(&mut self, db: &mut Db) -> (Disposition, Vec<RespBody>) {
         let mut stream = &self.stream;
         let mut buf = [0u8; READ_BUF];
         let mut to_propagate: Vec<RespBody> = vec![];
@@ -215,11 +215,11 @@ impl Client {
         ReplyOutcome { replies, forwards }
     }
 
-    pub fn write_out(&mut self, resp: &RespBody) {
+    pub(crate) fn write_out(&mut self, resp: &RespBody) {
         resp.encode(&mut self.outbuf);
     }
 
-    pub fn flush(&mut self) -> Disposition {
+    pub(crate) fn flush(&mut self) -> Disposition {
         if let Err(e) = self.stream.write_all(&self.outbuf) {
             error!(?e, "flush failed");
             return Disposition::Drop;
@@ -231,12 +231,12 @@ impl Client {
 
     /// Only reached from Normal mode: a nested MULTI is rejected in the command
     /// layer before it ever gets here, so there's no in-transaction case to guard.
-    pub fn start_transaction(&mut self) -> RespBody {
+    fn start_transaction(&mut self) -> RespBody {
         self.mode = ClientMode::Transaction;
         RespBody::new_ok()
     }
 
-    pub fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
+    fn add_to_transaction(&mut self, resp: RespBody) -> RespBody {
         if self.mode == ClientMode::Transaction {
             self.queue.push_front(resp);
             RespBody::new_queued()
@@ -248,15 +248,15 @@ impl Client {
     /// Runs every queued command for real. Returns the EXEC reply array plus
     /// any forwards those commands produced — queued writes execute here for
     /// the first time, so this is the only place their propagation is decided.
-    pub fn exec_transaction(&mut self, db: &mut Db) -> (RespBody, Vec<RespBody>) {
+    fn exec_transaction(&mut self, db: &mut Db) -> (RespBody, Vec<RespBody>) {
         if self.mode != ClientMode::Transaction {
             (RespBody::new_error(&CommandError::ExecTransaction), vec![])
         } else if self.queue.is_empty() {
-            self.make_normal_mode();
+            self.mode = ClientMode::Normal;
             db.remove_watcher(self.id);
             (RespBody::Array(Some(vec![])), vec![])
         } else {
-            self.make_normal_mode();
+            self.mode = ClientMode::Normal;
             db.remove_watcher(self.id);
             let mut out: Vec<RespBody> = vec![];
             let mut forwards: Vec<RespBody> = vec![];
@@ -272,10 +272,10 @@ impl Client {
         }
     }
 
-    pub fn discard_transaction(&mut self, db: &mut Db, resp: Option<RespBody>) -> RespBody {
+    fn discard_transaction(&mut self, db: &mut Db, resp: Option<RespBody>) -> RespBody {
         if self.mode == ClientMode::Transaction {
-            self.make_normal_mode();
-            self.clear_queue();
+            self.mode = ClientMode::Normal;
+            self.queue.clear();
             db.remove_watcher(self.id);
             resp.unwrap_or_else(RespBody::new_ok)
         } else {
@@ -283,19 +283,11 @@ impl Client {
         }
     }
 
-    pub const fn make_normal_mode(&mut self) {
-        self.mode = ClientMode::Normal;
-    }
-
-    fn clear_queue(&mut self) {
-        self.queue = VecDeque::new();
-    }
-
-    pub const fn role(&self) -> ClientRole {
+    pub(crate) const fn role(&self) -> ClientRole {
         self.role
     }
 
-    pub fn promote_to_slave(&mut self) {
+    fn promote_to_slave(&mut self) {
         self.role = ClientRole::Slave;
     }
 
