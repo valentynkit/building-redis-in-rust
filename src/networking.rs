@@ -221,28 +221,14 @@ impl Server {
 
             let stream = std::net::TcpStream::connect(master_addr)?;
             // Long lived replication link for slave -> master
-            let mut stream = mio::net::TcpStream::from_std(stream);
+            let stream = mio::net::TcpStream::from_std(stream);
 
             let c_token = Token(self.get_increased_id());
-
-            if let Err(error) =
-                self.poll
-                    .registry()
-                    .register(&mut stream, c_token, Interest::READABLE)
-            {
-                error!(?c_token, ?error, "registration failed");
-                return Err(NetworkingError::HandshakeUnfinished.into());
-            }
+            let client = self
+                .register_client(stream, c_token, ClientRole::Master)
+                .expect("client initialization should succedd");
 
             info!(?c_token, "connected master_client");
-            let server_info = Rc::clone(&self.server_info);
-            let client = Client::new(
-                stream,
-                ClientId::new(c_token.0),
-                ClientRole::Master,
-                server_info,
-            );
-
             self.master_link = Some(client);
         }
 
@@ -275,7 +261,12 @@ impl Server {
         }
     }
 
-    fn init_client(&mut self, mut stream: TcpStream, c_token: Token) -> Option<Client> {
+    fn register_client(
+        &self,
+        mut stream: TcpStream,
+        c_token: Token,
+        role: ClientRole,
+    ) -> Option<Client> {
         if let Err(error) = self
             .poll
             .registry()
@@ -286,12 +277,7 @@ impl Server {
         }
 
         let server_info = Rc::clone(&self.server_info);
-        let client = Client::new(
-            stream,
-            ClientId::new(c_token.0),
-            ClientRole::Normal,
-            server_info,
-        );
+        let client = Client::new(stream, ClientId::new(c_token.0), role, server_info);
         Some(client)
     }
 
@@ -303,7 +289,7 @@ impl Server {
                     let c_token = Token(self.get_increased_id());
                     info!(?addr, ?c_token, "connected client");
                     let client = self
-                        .init_client(stream, c_token)
+                        .register_client(stream, c_token, ClientRole::Normal)
                         .expect("client initialization should succedd");
 
                     self.clients.insert(c_token, client);
