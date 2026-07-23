@@ -290,6 +290,7 @@ impl Db {
         key: Key,
         timeout: Option<Duration>,
         client_id: ClientId,
+        allow_block: bool,
     ) -> Result<Option<Value>, CommandError> {
         // TODO: could be refactored
         if let Some(list) = self.as_list_mut(&key)?
@@ -300,6 +301,12 @@ impl Db {
             // must not invalidate a WATCH on this key.
             self.make_dirty(&key);
             return Ok(Some(item));
+        }
+
+        // Blocking disabled (running inside EXEC): don't register a waiter —
+        // the caller turns this into an immediate nil reply.
+        if !allow_block {
+            return Ok(None);
         }
 
         debug!(%key, "adding waiter");
@@ -791,7 +798,7 @@ mod test {
         let watcher = ClientId::new(1);
         db.add_watchers(vec![key.clone()], watcher);
 
-        assert!(db.blpop(key, None, ClientId::new(2)).unwrap().is_none());
+        assert!(db.blpop(key, None, ClientId::new(2), true).unwrap().is_none());
         assert!(!db.is_dirty(watcher));
     }
 
@@ -803,7 +810,7 @@ mod test {
         db.list_append(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
 
-        let got = db.blpop(key, None, ClientId::new(1)).unwrap().unwrap();
+        let got = db.blpop(key, None, ClientId::new(1), true).unwrap().unwrap();
         assert_eq!(Vec::<u8>::from(got), b"a".to_vec());
     }
 
@@ -817,7 +824,7 @@ mod test {
         let watcher = ClientId::new(1);
         db.add_watchers(vec![key.clone()], watcher);
 
-        assert!(db.blpop(key, None, ClientId::new(2)).unwrap().is_some());
+        assert!(db.blpop(key, None, ClientId::new(2), true).unwrap().is_some());
         assert!(db.is_dirty(watcher));
     }
 
@@ -895,7 +902,7 @@ mod test {
         let key: Key = b"mylist".to_vec().into();
 
         assert!(
-            db.blpop(key.clone(), None, ClientId::new(1))
+            db.blpop(key.clone(), None, ClientId::new(1), true)
                 .unwrap()
                 .is_none()
         );
@@ -912,6 +919,29 @@ mod test {
             panic!("expected an array reply");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn blpop_with_blocking_disabled_registers_no_waiter() {
+        use crate::client::ClientId;
+        let mut db = db();
+        let key: Key = b"mylist".to_vec().into();
+
+        // Empty list, blocking disabled (as inside EXEC): no value returned...
+        assert!(
+            db.blpop(key.clone(), None, ClientId::new(1), false)
+                .unwrap()
+                .is_none()
+        );
+
+        // ...and crucially no waiter registered, so a later push delivers to nobody.
+        db.list_append(key.clone(), vec![b"a".to_vec().into()])
+            .unwrap();
+        let HandleWaitersResult { replies, .. } = db.handle_list_waiters();
+        assert!(
+            replies.is_empty(),
+            "a non-blocking blpop must not leave a dangling waiter"
+        );
     }
 
     #[test]

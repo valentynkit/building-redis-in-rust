@@ -39,8 +39,19 @@ fn expect_streams_keyword(args: &[Vec<u8>]) -> Result<&[Vec<u8>], CommandError> 
     }
 }
 
-pub fn xread(db: &mut Db, client_id: ClientId, args: &[Vec<u8>]) -> HandleCmdResult {
+pub fn xread(
+    db: &mut Db,
+    client_id: ClientId,
+    args: &[Vec<u8>],
+    allow_block: bool,
+) -> HandleCmdResult {
     let (block, rest) = parse_block_prefix(args)?;
+    // Inside EXEC blocking is disabled: a BLOCK request acts as a one-shot read.
+    let block = if allow_block {
+        block
+    } else {
+        BlockMode::NotBlocking
+    };
 
     let elems = expect_streams_keyword(rest)?;
 

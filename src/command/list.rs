@@ -62,6 +62,7 @@ pub fn blpop(
     key: &[u8],
     timeout: Option<&[u8]>,
     client_id: ClientId,
+    allow_block: bool,
 ) -> HandleCmdResult {
     let key: Key = key.into();
     let timeout = get_ttl(&ExpCmd::Ex, timeout)?.and_then(|timeout| {
@@ -71,11 +72,19 @@ pub fn blpop(
             Some(timeout)
         }
     });
-    let resp = db
-        .blpop(key.clone(), timeout, client_id)?
-        .map(|item| RespBody::Array(Some(vec![RespBody::from(key), RespBody::from(item)]))); // None → key absent → caller writes $-1
+    let popped = db.blpop(key.clone(), timeout, client_id, allow_block)?;
 
-    resp.map_or(Ok(Reply::Blocked), |resp| Ok(Reply::write(resp)))
+    Ok(match popped {
+        Some(item) => Reply::write(RespBody::Array(Some(vec![
+            RespBody::from(key),
+            RespBody::from(item),
+        ]))),
+        // No value and we're allowed to block: the waiter is registered, reply later.
+        None if allow_block => Reply::Blocked,
+        // No value and blocking is disabled (inside EXEC): act as an immediate
+        // timeout — nil array, nothing mutated, nothing to replicate.
+        None => Reply::readonly(RespBody::Array(None)),
+    })
 }
 
 pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
@@ -202,14 +211,14 @@ mod test {
         let mut db = db();
         push(&mut db, &Side::Back, b"mylist".as_ref(), &[b"a".to_vec()]).unwrap();
 
-        let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1)).unwrap();
+        let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1), true).unwrap();
         assert!(matches!(reply, Reply::Now(_, _)));
     }
 
     #[test]
     fn blpop_blocks_when_list_is_empty() {
         let mut db = db();
-        let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1)).unwrap();
+        let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1), true).unwrap();
         assert!(matches!(reply, Reply::Blocked));
     }
 }
