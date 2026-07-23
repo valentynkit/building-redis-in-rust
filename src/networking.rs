@@ -14,7 +14,7 @@ use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 
-use crate::client::{Client, ClientId, ClientRole, Disposition};
+use crate::client::{Client, ClientId, PeerRole, Disposition};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
 use crate::{Cli, client};
@@ -227,7 +227,7 @@ impl Server {
 
             let c_token = MASTER;
             let client = self
-                .register_client(stream, c_token, ClientRole::Master)
+                .register_client(stream, c_token, PeerRole::Master)
                 .expect("client initialization should succedd");
 
             info!(?c_token, "connected master_client");
@@ -268,7 +268,7 @@ impl Server {
         &self,
         mut stream: TcpStream,
         c_token: Token,
-        role: ClientRole,
+        role: PeerRole,
     ) -> Option<Client> {
         if let Err(error) = self
             .poll
@@ -292,7 +292,7 @@ impl Server {
                     let c_token = Token(self.get_increased_id());
                     info!(?addr, ?c_token, "connected client");
                     let client = self
-                        .register_client(stream, c_token, ClientRole::Normal)
+                        .register_client(stream, c_token, PeerRole::Normal)
                         .expect("client initialization should succedd");
 
                     self.clients.insert(c_token, client);
@@ -325,13 +325,13 @@ impl Server {
         if let Some(client) = self.clients.get_mut(&token) {
             let (disposition, to_propogate) = client.on_readable(&mut self.db);
             if matches!(disposition, Disposition::Drop) {
-                let client_role = client.role();
+                let client_role = client.peer_role();
 
                 self.db.remove_watcher(ClientId::new(token.0));
                 warn!("removing client");
                 self.clients.remove(&token);
 
-                if client_role == ClientRole::Slave && self.slaves.contains(&token) {
+                if client_role == PeerRole::Slave && self.slaves.contains(&token) {
                     self.slaves.remove(&token);
 
                     let mut server_info = self.server_info.borrow_mut();
@@ -339,7 +339,7 @@ impl Server {
                 }
                 return;
             }
-            if client.role() == ClientRole::Slave && !self.slaves.contains(&token) {
+            if client.peer_role() == PeerRole::Slave && !self.slaves.contains(&token) {
                 let mut server_info = self.server_info.borrow_mut();
                 server_info.connected_slaves += 1;
                 self.slaves.insert(token);
