@@ -23,6 +23,10 @@ pub struct ClientInfo {
     mode: ClientMode,
     role: ClientRole,
     server_info: Rc<RefCell<ServerInfo>>,
+    /// Whether a command run in this context may block (register a waiter).
+    /// False while replaying a queued command inside EXEC — blocking commands
+    /// act non-blocking there, matching Redis.
+    allow_block: bool,
 }
 
 impl ClientInfo {
@@ -31,12 +35,14 @@ impl ClientInfo {
         mode: ClientMode,
         role: ClientRole,
         server_info: Rc<RefCell<ServerInfo>>,
+        allow_block: bool,
     ) -> Self {
         Self {
             id,
             mode,
             role,
             server_info,
+            allow_block,
         }
     }
 }
@@ -119,13 +125,19 @@ impl Command {
             CommandKind::Llen => list::llen(db, &args[1]),
             CommandKind::Lpop => list::lpop(db, &args[1], args.get(2).map(Vec::as_slice)),
             CommandKind::Lrange => list::lrange(db, &args[1], &args[2], &args[3]),
-            CommandKind::Blpop => {
-                list::blpop(db, &args[1], args.get(2).map(Vec::as_slice), client_id)
-            }
+            CommandKind::Blpop => list::blpop(
+                db,
+                &args[1],
+                args.get(2).map(Vec::as_slice),
+                client_id,
+                self.client.allow_block,
+            ),
             CommandKind::Type => Ok(string::cmd_type(db, &args[1])),
             CommandKind::Xadd => stream::xadd(db, &args[1], &args[2], &args[3..args.len()]),
             CommandKind::Xrange => stream::xrange(db, &args[1], &args[2], &args[3]),
-            CommandKind::Xread => stream::xread(db, client_id, &args[1..args.len()]),
+            CommandKind::Xread => {
+                stream::xread(db, client_id, &args[1..args.len()], self.client.allow_block)
+            }
             CommandKind::Incr => string::incr(db, &args[1]),
             CommandKind::Multi => Ok(Reply::StartTransaction),
             CommandKind::Exec => Err(CommandError::ExecTransaction),

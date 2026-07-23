@@ -137,7 +137,7 @@ impl Client {
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
             let req_body = request.body();
-            let reply = self.process_request(db, req_body);
+            let reply = self.process_request(db, req_body, true);
 
             let resp_arr: Vec<RespBody> = match reply {
                 Ok((reply, forward)) => {
@@ -174,9 +174,15 @@ impl Client {
         &mut self,
         db: &mut Db,
         frame: RespBody,
+        allow_block: bool,
     ) -> Result<(Reply, Option<RespBody>), CommandError> {
-        let client_info =
-            ClientInfo::new(self.id, self.mode, self.role, Rc::clone(&self.server_info));
+        let client_info = ClientInfo::new(
+            self.id,
+            self.mode,
+            self.role,
+            Rc::clone(&self.server_info),
+            allow_block,
+        );
         Command::new(frame, client_info).and_then(|mut cmd| cmd.execute(db))
     }
 
@@ -256,7 +262,9 @@ impl Client {
             let mut out: Vec<RespBody> = vec![];
             let mut forwards: Vec<RespBody> = vec![];
             while let Some(item) = self.queue.pop_back() {
-                let reply = self.process_request(db, item);
+                // Inside EXEC blocking is disabled — a queued BLPOP/XREAD acts
+                // non-blocking so it can't register a waiter mid-transaction.
+                let reply = self.process_request(db, item, false);
 
                 let resp_arr: Vec<RespBody> = match reply {
                     Ok((reply, forward)) => {
@@ -440,5 +448,42 @@ mod test {
             client.on_readable(&mut db()),
             (Disposition::Drop, _)
         ));
+    }
+
+    /// Regression: a blocking command queued in MULTI must NOT block at EXEC —
+    /// it runs non-blocking and returns nil, so the EXEC array keeps one element
+    /// per queued command (here `*1` with a null-array element), not `*0`.
+    #[test]
+    fn blpop_in_transaction_runs_non_blocking() {
+        let (mut peer, mut client) = pair();
+        let mut frames = resp(&[b"MULTI"]);
+        frames.extend(resp(&[b"BLPOP", b"nokey", b"0"]));
+        frames.extend(resp(&[b"EXEC"]));
+        peer.write_all(&frames).unwrap();
+
+        client.on_readable(&mut db());
+
+        drop(client); // close owned side → peer reads to EOF
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"+OK\r\n+QUEUED\r\n*1\r\n*-1\r\n");
+    }
+
+    /// Same guarantee for the stream side: a queued `XREAD BLOCK` must run as a
+    /// one-shot read at EXEC, yielding a nil element rather than blocking.
+    #[test]
+    fn xread_block_in_transaction_runs_non_blocking() {
+        let (mut peer, mut client) = pair();
+        let mut frames = resp(&[b"MULTI"]);
+        frames.extend(resp(&[b"XREAD", b"BLOCK", b"0", b"STREAMS", b"s", b"0-0"]));
+        frames.extend(resp(&[b"EXEC"]));
+        peer.write_all(&frames).unwrap();
+
+        client.on_readable(&mut db());
+
+        drop(client);
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"+OK\r\n+QUEUED\r\n*1\r\n*-1\r\n");
     }
 }
