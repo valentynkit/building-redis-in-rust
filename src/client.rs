@@ -40,7 +40,7 @@ pub enum ClientMode {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub enum ClientRole {
+pub enum PeerRole {
     Normal,
     Master,
     Slave,
@@ -57,7 +57,7 @@ pub struct Client {
     id: ClientId,
     stream: TcpStream,
     mode: ClientMode,
-    role: ClientRole,
+    peer_role: PeerRole,
     queue: VecDeque<RespBody>,
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
@@ -68,14 +68,14 @@ impl Client {
     pub fn new(
         stream: TcpStream,
         id: ClientId,
-        role: ClientRole,
+        peer_role: PeerRole,
         server_info: Rc<RefCell<ServerInfo>>,
     ) -> Self {
         Self {
             id,
             stream,
             mode: ClientMode::Normal,
-            role,
+            peer_role,
             queue: VecDeque::new(),
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
@@ -99,16 +99,16 @@ impl Client {
                 self.inbuf.extend_from_slice(&buf[..n]);
                 to_propagate.extend(self.consume(db));
 
-                match self.role {
-                    ClientRole::Normal => self.flush(),
-                    ClientRole::Master => {
+                match self.peer_role {
+                    PeerRole::Normal => self.flush(),
+                    PeerRole::Master => {
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         // todo!()
                         info!("slave received from master");
                         Disposition::Keep
                     }
-                    ClientRole::Slave => {
+                    PeerRole::Slave => {
                         if matches!(self.flush(), Disposition::Drop) {
                             Disposition::Drop
                         } else {
@@ -137,9 +137,9 @@ impl Client {
             let outcome = self.run_request(db, request.body(), true);
             out.extend(outcome.forwards);
             for resp in outcome.replies {
-                match self.role {
-                    ClientRole::Normal | ClientRole::Slave => self.write_out(&resp),
-                    ClientRole::Master => {
+                match self.peer_role {
+                    PeerRole::Normal | PeerRole::Slave => self.write_out(&resp),
+                    PeerRole::Master => {
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         trace!(
@@ -181,7 +181,7 @@ impl Client {
         let client_info = ClientInfo::new(
             self.id,
             self.mode,
-            self.role,
+            self.peer_role,
             Rc::clone(&self.server_info),
             allow_block,
         );
@@ -299,12 +299,12 @@ impl Client {
         }
     }
 
-    pub(crate) const fn role(&self) -> ClientRole {
-        self.role
+    pub(crate) const fn peer_role(&self) -> PeerRole {
+        self.peer_role
     }
 
     fn promote_to_slave(&mut self) {
-        self.role = ClientRole::Slave;
+        self.peer_role = PeerRole::Slave;
     }
 
     pub(crate) fn read_line(&mut self) -> io::Result<String> {
@@ -317,7 +317,7 @@ impl Client {
 
 #[cfg(test)]
 mod test {
-    use super::{Client, ClientId, ClientRole, Disposition};
+    use super::{Client, ClientId, Disposition, PeerRole};
     use crate::db::Db;
     use crate::networking::{ServerInfo, ServerRole};
     use std::cell::RefCell;
@@ -365,7 +365,7 @@ mod test {
         let client = Client::new(
             mio::net::TcpStream::from_std(owned),
             ClientId::new(1),
-            ClientRole::Normal,
+            PeerRole::Normal,
             server_info,
         );
         (peer, client)

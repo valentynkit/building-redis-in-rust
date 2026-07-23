@@ -8,7 +8,7 @@ use std::io::{BufReader, Read};
 use std::mem;
 use std::rc::Rc;
 
-use crate::client::{ClientId, ClientMode, ClientRole};
+use crate::client::{ClientId, ClientMode, PeerRole};
 use crate::command::common::{CommandError, HandleCmdResult};
 use crate::command::list::Side;
 use crate::db::Db;
@@ -21,7 +21,7 @@ use tracing::{debug, error, field, info, warn, Span};
 pub struct ClientInfo {
     id: ClientId,
     mode: ClientMode,
-    role: ClientRole,
+    role: PeerRole,
     server_info: Rc<RefCell<ServerInfo>>,
     /// Whether a command run in this context may block (register a waiter).
     /// False while replaying a queued command inside EXEC — blocking commands
@@ -33,7 +33,7 @@ impl ClientInfo {
     pub const fn new(
         id: ClientId,
         mode: ClientMode,
-        role: ClientRole,
+        role: PeerRole,
         server_info: Rc<RefCell<ServerInfo>>,
         allow_block: bool,
     ) -> Self {
