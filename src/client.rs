@@ -134,25 +134,9 @@ impl Client {
         let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
-            let req_body = request.body();
-            let reply = self.process_request(db, req_body, true);
-
-            let resp_arr: Vec<RespBody> = match reply {
-                Ok((reply, forward)) => {
-                    if let Some(forward) = forward {
-                        out.push(forward);
-                    }
-
-                    let outcome = self.post_process_success_request(db, reply);
-                    out.extend(outcome.forwards);
-                    outcome.replies
-                }
-                Err(err) => {
-                    debug!(?err, "command error");
-                    vec![RespBody::new_error(&err)]
-                }
-            };
-            for resp in resp_arr {
+            let outcome = self.run_request(db, request.body(), true);
+            out.extend(outcome.forwards);
+            for resp in outcome.replies {
                 match self.role {
                     ClientRole::Normal | ClientRole::Slave => self.write_out(&resp),
                     ClientRole::Master => {
@@ -166,6 +150,26 @@ impl Client {
             }
         }
         out
+    }
+
+    /// Run one parsed request through the command layer and fold the result into
+    /// a ReplyOutcome — the replies for this client plus any writes to forward to
+    /// slaves. `allow_block` is false while replaying queued commands inside EXEC.
+    fn run_request(&mut self, db: &mut Db, frame: RespBody, allow_block: bool) -> ReplyOutcome {
+        match self.process_request(db, frame, allow_block) {
+            Ok((reply, forward)) => {
+                let mut outcome = self.post_process_success_request(db, reply);
+                outcome.forwards.extend(forward);
+                outcome
+            }
+            Err(err) => {
+                debug!(?err, "command error");
+                ReplyOutcome {
+                    replies: vec![RespBody::new_error(&err)],
+                    forwards: vec![],
+                }
+            }
+        }
     }
 
     fn process_request(
@@ -259,24 +263,9 @@ impl Client {
             while let Some(item) = self.queue.pop_back() {
                 // Inside EXEC blocking is disabled — a queued BLPOP/XREAD acts
                 // non-blocking so it can't register a waiter mid-transaction.
-                let reply = self.process_request(db, item, false);
-
-                let resp_arr: Vec<RespBody> = match reply {
-                    Ok((reply, forward)) => {
-                        if let Some(forward) = forward {
-                            forwards.push(forward);
-                        }
-                        self.post_process_success_request(db, reply).replies
-                    }
-                    Err(err) => {
-                        debug!(?err, "command error");
-                        vec![RespBody::new_error(&err)]
-                    }
-                };
-
-                for resp in resp_arr {
-                    out.push(resp);
-                }
+                let outcome = self.run_request(db, item, false);
+                forwards.extend(outcome.forwards);
+                out.extend(outcome.replies);
             }
 
             (RespBody::Array(Some(out)), forwards)
