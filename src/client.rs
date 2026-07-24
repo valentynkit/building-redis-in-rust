@@ -5,7 +5,7 @@ use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
 use crate::networking::ServerInfo;
-use crate::resp::{self, Reply, RespBody};
+use crate::resp::{self, Frame, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -106,7 +106,7 @@ impl Client {
                         // the ACK should be handled not by req-resp but in before sleep
                         // todo!()
                         info!("slave received from master");
-                        Disposition::Keep
+                        self.flush()
                     }
                     PeerRole::Slave => {
                         if matches!(self.flush(), Disposition::Drop) {
@@ -134,12 +134,22 @@ impl Client {
         let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
-            let outcome = self.run_request(db, request.body(), true);
+            let body = request.body();
+            let is_getack = matches!(self.peer_role, PeerRole::Master)
+                && body.clone().into_args().is_some_and(|args| {
+                    args.get(1)
+                        .is_some_and(|a| a.eq_ignore_ascii_case(b"GETACK"))
+                });
+
+            let outcome = self.run_request(db, body, true);
             out.extend(outcome.forwards);
             for resp in outcome.replies {
                 match self.peer_role {
                     PeerRole::Normal | PeerRole::Slave => self.write_out(&resp),
                     PeerRole::Master => {
+                        if is_getack {
+                            self.write_out(&resp);
+                        }
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         trace!(

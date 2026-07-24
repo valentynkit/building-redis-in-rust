@@ -69,6 +69,7 @@ fn is_crlf(buf: &[u8]) -> bool {
     buf == [b'\r', b'\n']
 }
 
+#[derive(Clone)]
 pub enum RespBody {
     Simple(String),
     Rdb(Vec<u8>),
@@ -243,7 +244,7 @@ impl Frame {
 #[cfg(test)]
 mod test {
     use crate::command::common::CommandError;
-    use crate::resp::{parse_resp, RespBody};
+    use crate::resp::{RespBody, parse_resp};
 
     #[test]
     fn parses_array_of_bulk_strings() {
@@ -314,9 +315,11 @@ mod test {
 
     #[test]
     fn into_args_rejects_non_bulk_elements() {
-        assert!(RespBody::Array(Some(vec![RespBody::Integer(1)]))
-            .into_args()
-            .is_none());
+        assert!(
+            RespBody::Array(Some(vec![RespBody::Integer(1)]))
+                .into_args()
+                .is_none()
+        );
     }
 
     #[test]
