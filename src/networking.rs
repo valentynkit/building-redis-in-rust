@@ -12,12 +12,12 @@ use clap::error;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
-use tracing::{debug, debug_span, error, info, instrument, warn};
+use tracing::{debug, debug_span, error, field, info, info_span, trace, Span};
 
-use crate::client::{Client, ClientId, PeerRole, Disposition};
+use crate::client::{Client, ClientId, Disposition, PeerRole};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::{Cli, client};
+use crate::{client, Cli};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MASTER: Token = Token(1);
@@ -105,6 +105,7 @@ pub struct Server {
     cronloops: u64,
     start_time: StartTime,
     server_info: Rc<RefCell<ServerInfo>>,
+    server_span: Span,
 }
 
 impl Server {
@@ -137,7 +138,7 @@ impl Server {
             replica_of_parsed = Some(format!("{host}:{port}"));
         }
 
-        warn!(?role, ?replica_of_parsed);
+        info!(?role, ?replica_of_parsed, "server role resolved");
 
         //TODO:  make optional master_replid, offset. and have it None for slaves and configured for master.
         let server_info = Rc::new(RefCell::new(ServerInfo::new(
@@ -149,6 +150,17 @@ impl Server {
             cli.dir().into(),
             cli.dbfilename().into(),
         )));
+
+        let server_span = info_span!(
+            "server",
+            role = server_info.borrow().role.as_str(),
+            port,
+            replid = &server_info.borrow().master_replid[..7],
+            run_id = std::process::id(),
+            lfd = listener.as_raw_fd(),
+            slaves = field::Empty,
+        );
+
         Ok(Self {
             listener,
             clients: HashMap::new(),
@@ -160,13 +172,14 @@ impl Server {
             start_time,
             server_info,
             master_link: None,
+            server_span,
         })
     }
 
     fn set_current_time(&mut self) -> Result<()> {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let uptime = self.start_time.start_ms_mono.elapsed();
-        debug!(?uptime);
+        trace!(?uptime, "clock tick");
 
         self.db.update_time(realtime_ms);
         Ok(())
@@ -187,11 +200,12 @@ impl Server {
         for (client_id, resp) in list_replies.into_iter().chain(stream_replies) {
             let client_id = Token(client_id.get());
             if let Some(client) = self.clients.get_mut(&client_id) {
-                info!(?client_id, "writing to waiting client");
+                let _g = client.span().entered();
+                debug!("delivering blocked reply to waiter");
                 client.write_out(&resp);
 
                 if matches!(client.flush(), Disposition::Drop) {
-                    warn!("removing client");
+                    info!("waiter disconnected mid-flush; removed");
                     self.clients.remove(&client_id);
                 }
             }
@@ -212,12 +226,11 @@ impl Server {
                     return Ok(());
                 }
 
-                warn!("strarting the slave handshake");
                 let Some(master_addr) = &server_info.replica_of else {
                     return Err(NetworkingError::InvalidSlave.into());
                 };
 
-                info!(master_addr = %master_addr, "connecting slave to master");
+                info!(master_addr = %master_addr, "starting slave handshake");
                 master_addr.clone()
             };
 
@@ -225,24 +238,27 @@ impl Server {
             // Long lived replication link for slave -> master
             let stream = mio::net::TcpStream::from_std(stream);
 
-            let c_token = MASTER;
             let client = self
-                .register_client(stream, c_token, PeerRole::Master)
-                .expect("client initialization should succedd");
+                .register_client(stream, MASTER, PeerRole::Master)
+                .expect("master link registration should succeed");
 
-            info!(?c_token, "connected master_client");
             self.master_link = Some(client);
         }
+
+        // Every handshake step logs under the master link's connection span.
+        let span = self.master_link.as_ref().expect("master link set").span();
+        let _g = span.entered();
 
         self.slave_ping()?;
         self.slave_replconf(port)?;
         self.slave_psync()?;
-        info!("handshake successfully finished, client is ready");
+        info!("handshake finished; replica ready");
         Ok(())
     }
 
-    #[instrument(skip(self), fields(lfd = self.listener.as_raw_fd()))]
     pub fn run(mut self, port: u16) -> Result<()> {
+        let _server_guard = self.server_span.clone().entered();
+        info!("server starting");
         let mut events = Events::with_capacity(MAX_EVENTS);
         self.slave_handshake(port)?;
         loop {
@@ -284,17 +300,17 @@ impl Server {
         Some(client)
     }
 
-    #[instrument(skip(self))]
     fn accept_client(&mut self) {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
                     let c_token = Token(self.get_increased_id());
-                    info!(?addr, ?c_token, "connected client");
                     let client = self
                         .register_client(stream, c_token, PeerRole::Normal)
-                        .expect("client initialization should succedd");
+                        .expect("client registration should succeed");
 
+                    let _g = client.span().entered();
+                    info!(?addr, "client connected");
                     self.clients.insert(c_token, client);
                 }
 
@@ -308,61 +324,75 @@ impl Server {
         }
     }
 
-    #[instrument(skip(self))]
     fn service_master(&mut self) {
-        if let Some(master) = &mut self.master_link {
-            let (disposition, _) = master.on_readable(&mut self.db);
-
-            if matches!(disposition, Disposition::Drop) {
-                error!("master link was dropped");
-            }
-        } else {
-            error!("master_link empty");
+        let Some(master) = &mut self.master_link else {
+            error!("master link empty");
+            return;
+        };
+        let _g = master.span().entered();
+        debug!("servicing master link");
+        let (disposition, _) = master.on_readable(&mut self.db);
+        if matches!(disposition, Disposition::Drop) {
+            error!("master link dropped");
         }
     }
-    #[instrument(skip(self, token), fields(client_id = token.0))]
+
     fn service_client(&mut self, token: Token) {
-        if let Some(client) = self.clients.get_mut(&token) {
-            let (disposition, to_propogate) = client.on_readable(&mut self.db);
-            if matches!(disposition, Disposition::Drop) {
-                let client_role = client.peer_role();
+        let Some(client) = self.clients.get_mut(&token) else {
+            return;
+        };
+        let _g = client.span().entered();
+        debug!("servicing client");
+        let (disposition, to_propagate) = client.on_readable(&mut self.db);
+        if matches!(disposition, Disposition::Drop) {
+            let client_role = client.peer_role();
 
-                self.db.remove_watcher(ClientId::new(token.0));
-                warn!("removing client");
-                self.clients.remove(&token);
+            self.db.remove_watcher(ClientId::new(token.0));
+            info!("client disconnected; removed");
+            self.clients.remove(&token);
 
-                if client_role == PeerRole::Slave && self.slaves.contains(&token) {
-                    self.slaves.remove(&token);
+            if client_role == PeerRole::Slave && self.slaves.contains(&token) {
+                self.slaves.remove(&token);
 
+                let slaves = {
                     let mut server_info = self.server_info.borrow_mut();
                     server_info.connected_slaves -= 1;
-                }
-                return;
+                    server_info.connected_slaves
+                };
+                self.server_span.record("slaves", slaves as u64);
+                info!(slaves, "replica detached");
             }
-            if client.peer_role() == PeerRole::Slave && !self.slaves.contains(&token) {
+            return;
+        }
+        if client.peer_role() == PeerRole::Slave && !self.slaves.contains(&token) {
+            let slaves = {
                 let mut server_info = self.server_info.borrow_mut();
                 server_info.connected_slaves += 1;
-                self.slaves.insert(token);
-            }
+                server_info.connected_slaves
+            };
+            self.slaves.insert(token);
+            self.server_span.record("slaves", slaves as u64);
+            info!(slaves, "replica attached");
+        }
 
-            for cmd in &to_propogate {
-                for token in &mut self.slaves.iter() {
-                    if let Some(slave) = self.clients.get_mut(token) {
-                        slave.write_out(cmd);
-                        slave.flush();
-                    }
+        for cmd in &to_propagate {
+            let mut delivered = 0u64;
+            for token in &mut self.slaves.iter() {
+                if let Some(slave) = self.clients.get_mut(token) {
+                    slave.write_out(cmd);
+                    slave.flush();
+                    delivered += 1;
                 }
             }
+            debug!(slaves = delivered, "propagated write");
         }
     }
 
     fn slave_psync(&mut self) -> Result<(), anyhow::Error> {
-        info!("starting replconf for master-slave");
-
         let Some(master_client) = &mut self.master_link else {
             return Err(NetworkingError::HandshakeUnfinished.into());
         };
-        // 1/2
+        debug!("handshake step: PSYNC");
         let resp_body = ["PSYNC", "?", "-1"].into_iter().collect::<RespBody>();
 
         master_client.write_out(&resp_body);
@@ -370,7 +400,7 @@ impl Server {
         let out = master_client.read_line()?;
 
         if !out.starts_with("+FULLRESYNC ") {
-            error!(?out, "master-slave psync: expected +FULLRESYNC\r\n");
+            error!(?out, "handshake PSYNC: expected +FULLRESYNC");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
@@ -378,12 +408,10 @@ impl Server {
     }
 
     fn slave_replconf(&mut self, port: u16) -> Result<(), anyhow::Error> {
-        info!("starting replconf for master-slave");
-
         let Some(master_client) = &mut self.master_link else {
             return Err(NetworkingError::HandshakeUnfinished.into());
         };
-        // 1/2
+        debug!("handshake step: REPLCONF listening-port");
         let resp_body = ["REPLCONF", "listening-port", &port.to_string()]
             .into_iter()
             .collect::<RespBody>();
@@ -393,11 +421,11 @@ impl Server {
 
         let out = master_client.read_line()?;
         if out != "+OK\r\n" {
-            error!(?out, "master-slave repl_conf 1/2: expected +OK\r\n");
+            error!(?out, "handshake REPLCONF 1/2: expected +OK");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
-        // 2/2
+        debug!("handshake step: REPLCONF capa psync2");
         let resp_body = ["REPLCONF", "capa", "psync2"]
             .into_iter()
             .collect::<RespBody>();
@@ -406,7 +434,7 @@ impl Server {
         master_client.flush();
         let out = master_client.read_line()?;
         if out != "+OK\r\n" {
-            error!(?out, "master-slave repl_conf 2/2: expected +OK\r\n");
+            error!(?out, "handshake REPLCONF 2/2: expected +OK");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 
@@ -416,12 +444,12 @@ impl Server {
         let Some(master_client) = &mut self.master_link else {
             return Err(NetworkingError::HandshakeUnfinished.into());
         };
-
+        debug!("handshake step: PING");
         master_client.write_out(&iter::once("PING").collect::<RespBody>());
         master_client.flush();
         let out = master_client.read_line()?;
         if out != "+PONG\r\n" {
-            error!(?out, "master-slave: expected +PONG\r\n");
+            error!(?out, "handshake PING: expected +PONG");
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
 

@@ -1,5 +1,5 @@
 use mio::net::TcpStream;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, field, info, info_span, trace, warn, Span};
 
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
@@ -10,6 +10,7 @@ use crate::resp::{self, Frame, Reply, RespBody};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
+use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 const READ_BUF: usize = 512;
@@ -46,6 +47,16 @@ pub enum PeerRole {
     Slave,
 }
 
+impl PeerRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Master => "master",
+            Self::Slave => "slave",
+        }
+    }
+}
+
 /// What processing one `Reply` produced: the bodies to send back to this
 /// client, and any write commands from it that need to reach slaves.
 struct ReplyOutcome {
@@ -62,6 +73,7 @@ pub struct Client {
     inbuf: Vec<u8>,
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
+    span: Span,
 }
 
 impl Client {
@@ -71,6 +83,20 @@ impl Client {
         peer_role: PeerRole,
         server_info: Rc<RefCell<ServerInfo>>,
     ) -> Self {
+        let fd = stream.as_raw_fd();
+        let addr = stream
+            .peer_addr()
+            .map_or_else(|_| "unknown".to_string(), |a| a.to_string());
+        // Connection-scoped span: re-entered on every servicing, so every log on
+        // this client's hot path inherits {id, peer_role, fd, addr} for free.
+        let span = info_span!(
+            "conn",
+            id = id.get() as u64,
+            peer_role = field::Empty,
+            fd,
+            addr = %addr,
+        );
+        span.record("peer_role", peer_role.as_str());
         Self {
             id,
             stream,
@@ -80,6 +106,7 @@ impl Client {
             inbuf: Vec::with_capacity(READ_BUF),
             outbuf: Vec::new(),
             server_info,
+            span,
         }
     }
 
@@ -105,7 +132,7 @@ impl Client {
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         // todo!()
-                        info!("slave received from master");
+                        debug!("slave received from master");
                         self.flush()
                     }
                     PeerRole::Slave => {
@@ -232,7 +259,7 @@ impl Client {
     }
 
     pub(crate) fn flush(&mut self) -> Disposition {
-        debug!(wire_out = %self.outbuf.escape_ascii(), buf_len = self.outbuf.len(), "flushing to client");
+        trace!(wire_out = %self.outbuf.escape_ascii(), buf_len = self.outbuf.len(), "flushing to client");
         let mut written = 0;
         while written < self.outbuf.len() {
             match self.stream.write(&self.outbuf[written..]) {
@@ -315,8 +342,13 @@ impl Client {
         self.peer_role
     }
 
+    pub(crate) fn span(&self) -> Span {
+        self.span.clone()
+    }
+
     fn promote_to_slave(&mut self) {
         self.peer_role = PeerRole::Slave;
+        self.span.record("peer_role", PeerRole::Slave.as_str());
     }
 
     pub(crate) fn read_line(&mut self) -> io::Result<String> {
