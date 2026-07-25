@@ -27,6 +27,8 @@ pub enum CommandError {
     IntOverflow,
     #[error("unknown info command '{0}'")]
     Info(String),
+    #[error("invalid arguments for command")]
+    InvalidArguments,
     #[error("wrong number of arguments for '{0}', expected: '{1}'")]
     WrongArity(String, String),
     #[error("wrong argument format: expected number. actual '{0}'")]
@@ -49,6 +51,8 @@ pub enum CommandError {
     WatchTransaction,
     #[error("Slave doesn't support such command")]
     SlaveUnsupported,
+    #[error("This commands are supported only for slave - master replication")]
+    UnsupportedReplication,
     #[error("Rdb file doesn't exist")]
     NoRdbFile,
 }

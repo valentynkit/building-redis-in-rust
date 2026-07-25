@@ -71,6 +71,7 @@ fn is_crlf(buf: &[u8]) -> bool {
 
 #[derive(Clone)]
 pub enum RespBody {
+    Empty,
     Simple(String),
     Rdb(Vec<u8>),
     Error(String),
@@ -93,6 +94,7 @@ impl RespBody {
     }
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
+            Self::Empty => {}
             Self::Simple(s) => write_simple_string(out, s),
             Self::Rdb(bytes) => write_rdb(out, bytes),
             Self::Error(s) => write_simple_error(out, s),

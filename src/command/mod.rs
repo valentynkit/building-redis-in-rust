@@ -12,10 +12,10 @@ use crate::client::{ClientId, ClientMode, PeerRole};
 use crate::command::common::{CommandError, HandleCmdResult};
 use crate::command::list::Side;
 use crate::db::Db;
-use crate::networking::ServerInfo;
+use crate::networking::{ServerInfo, ServerRole};
 use crate::resp::{Propagate, Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{debug, error, field, info, warn, Span};
+use tracing::{Span, debug, error, field, info, warn};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -104,6 +104,7 @@ impl Command {
     ) -> Result<(Reply, Option<RespBody>), CommandError> {
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
+        let client_role = self.client.role;
         let reply = match self.kind {
             CommandKind::Info => common::info(
                 client_id,
@@ -144,7 +145,13 @@ impl Command {
             CommandKind::Discard => Err(CommandError::DiscardTransaction),
             CommandKind::Watch => Ok(common::watch_keys(db, client_id, &args[1..args.len()])),
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
-            CommandKind::Replconf => Ok(repl_conf()),
+            CommandKind::Replconf => repl_conf(
+                client_id,
+                &self.client.server_info.borrow(),
+                client_role,
+                args.get(1).map(Vec::as_slice),
+                args.get(2).map(Vec::as_slice),
+            ),
             CommandKind::Psync => psync(&self.client.server_info.borrow()),
         }?;
 
@@ -171,6 +178,28 @@ impl InfoSection {
             .ok_or_else(|| CommandError::Info(String::from_utf8_lossy(value).into_owned()))
     }
 }
+
+#[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
+#[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
+enum ReplConfSubCommands {
+    // IS it case insensitive, or it overwrites global case insensitive serialization so
+    // LISTENING-PORT will not match?
+    #[strum(serialize = "listening-port")]
+    ListeningPort,
+    Capa,
+    GetAck,
+    Ack,
+}
+
+impl ReplConfSubCommands {
+    fn from_bytes(value: &[u8]) -> Result<Self, CommandError> {
+        str::from_utf8(value)
+            .ok()
+            .and_then(|s| s.parse::<Self>().ok())
+            .ok_or_else(|| CommandError::Unknown(String::from_utf8_lossy(value).into_owned()))
+    }
+}
+
 #[derive(AsRefStr, EnumString, Debug, Display, Clone, Copy)]
 #[strum(serialize_all = "UPPERCASE", ascii_case_insensitive)]
 enum CommandKind {
@@ -284,9 +313,83 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let rdb = RespBody::Rdb(buffer);
     Ok(Reply::Rdb(RespBody::Simple(out), rdb))
 }
+fn handle_repl_getack(
+    value: &[u8],
+    server_info: &ServerInfo,
+    client_role: PeerRole,
+) -> Result<RespBody, CommandError> {
+    if value != b"*" {
+        error!("expected '*' as argument value");
+        return Err(CommandError::InvalidArguments);
+    }
 
-fn repl_conf() -> Reply {
-    Reply::readonly(RespBody::new_ok())
+    if server_info.role != ServerRole::Slave || client_role != PeerRole::Master {
+        error!(
+            "replconf getack is expected to happend on  slave from master, current state is invalid for this cmd"
+        );
+        return Err(CommandError::UnsupportedReplication);
+    }
+    let offset = server_info.master_repl_offset;
+    info!(?offset, "slave sending offset to master");
+
+    let resp_body = ["REPLCONF", "ACK", &offset.to_string()]
+        .into_iter()
+        .collect::<RespBody>();
+
+    Ok(resp_body)
+}
+
+fn handle_repl_ack(
+    offset: &[u8],
+    server_info: &ServerInfo,
+    client_role: PeerRole,
+) -> Result<RespBody, CommandError> {
+    if server_info.role != ServerRole::Master || client_role != PeerRole::Slave {
+        error!(
+            "replconf ack is expected to happend on master from slave, current state is invalid for this cmd"
+        );
+
+        return Err(CommandError::UnsupportedReplication);
+    }
+
+    // TODO: validate offset from slave
+    info!(?offset, "master received offset from slave");
+    Ok(RespBody::Empty)
+}
+
+fn repl_conf(
+    _client_id: ClientId,
+    server_info: &ServerInfo,
+    client_role: PeerRole,
+    sub_cmd: Option<&[u8]>,
+    arg_value: Option<&[u8]>,
+) -> HandleCmdResult {
+    if server_info.role != ServerRole::Master && server_info.role != ServerRole::Slave {
+        return Err(CommandError::UnsupportedReplication);
+    }
+    let Some(sub_cmd) = sub_cmd else {
+        return Err(CommandError::InvalidArguments);
+    };
+
+    let sub_cmd = ReplConfSubCommands::from_bytes(sub_cmd)?;
+
+    let resp = match sub_cmd {
+        ReplConfSubCommands::ListeningPort | ReplConfSubCommands::Capa => RespBody::new_ok(),
+        ReplConfSubCommands::Ack => {
+            let Some(arg_value) = arg_value else {
+                return Err(CommandError::InvalidArguments);
+            };
+            handle_repl_ack(arg_value, server_info, client_role)?
+        }
+        ReplConfSubCommands::GetAck => {
+            let Some(arg_value) = arg_value else {
+                return Err(CommandError::InvalidArguments);
+            };
+            handle_repl_getack(arg_value, server_info, client_role)?
+        }
+    };
+
+    Ok(Reply::readonly(resp))
 }
 fn cmd_ping() -> Reply {
     Reply::readonly(RespBody::Simple("PONG".to_owned()))
