@@ -15,7 +15,7 @@ use crate::db::Db;
 use crate::networking::{ServerInfo, ServerRole};
 use crate::resp::{Propagate, Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{Span, debug, error, field, info, warn};
+use tracing::{debug, debug_span, error, field, info, Span};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -51,6 +51,7 @@ pub struct Command {
     kind: CommandKind,
     pub client: ClientInfo,
     args: Vec<Vec<u8>>,
+    span: Span,
 }
 
 impl Command {
@@ -63,14 +64,32 @@ impl Command {
             return Err(CommandError::Unknown(String::new()));
         }
         let kind: CommandKind = CommandKind::new(args.len(), &args[0])?;
-        Ok(Self { kind, client, args })
+        let span = debug_span!(
+            "command",
+            name = %kind,
+            argc = args.len(),
+            outcome = field::Empty,
+        );
+        Ok(Self {
+            kind,
+            client,
+            args,
+            span,
+        })
     }
 
     pub fn execute(&mut self, db: &mut Db) -> Result<(Reply, Option<RespBody>), CommandError> {
-        match self.client.mode {
+        let span = self.span.clone();
+        let _g = span.enter();
+        let result = match self.client.mode {
             ClientMode::Normal => self.handle_normal_mode(db),
             ClientMode::Transaction => self.handle_transaction_mode(db),
-        }
+        };
+        match &result {
+            Ok(_) => self.span.record("outcome", "ok"),
+            Err(err) => self.span.record("outcome", field::display(err)),
+        };
+        result
     }
 
     fn handle_transaction_mode(
@@ -232,9 +251,6 @@ impl CommandKind {
     fn new(argc: usize, value: &[u8]) -> Result<Self, CommandError> {
         let kind = Self::from_bytes(value)?;
         kind.check_arity(argc)?;
-
-        Span::current().record("cmd", field::display(&kind));
-        info!(command = ?kind, "handling cmd");
         Ok(kind)
     }
 
@@ -289,7 +305,7 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid.clone();
     let out = format!("FULLRESYNC {repl_id} 0");
     let path = server_info.rdb_path();
-    warn!(?path, "psync");
+    debug!(?path, "psync: serving rdb");
     let buffer = match File::open(&path) {
         Ok(file) => {
             let mut buf_reader = BufReader::new(file);
@@ -301,7 +317,7 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
             buffer
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            warn!(?path, "no rdb on disk, sending empty rdb");
+            info!(?path, "no rdb on disk; sending empty rdb");
             EMPTY_RDB.to_vec()
         }
         Err(err) => {
@@ -330,7 +346,7 @@ fn handle_repl_getack(
         return Err(CommandError::UnsupportedReplication);
     }
     let offset = server_info.master_repl_offset;
-    info!(?offset, "slave sending offset to master");
+    debug!(?offset, "slave sending ACK offset to master");
 
     let resp_body = ["REPLCONF", "ACK", &offset.to_string()]
         .into_iter()
@@ -353,7 +369,7 @@ fn handle_repl_ack(
     }
 
     // TODO: validate offset from slave
-    info!(?offset, "master received offset from slave");
+    debug!(?offset, "master received ACK offset from slave");
     Ok(RespBody::Empty)
 }
 
