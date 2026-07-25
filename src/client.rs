@@ -232,7 +232,7 @@ impl Client {
     }
 
     pub(crate) fn flush(&mut self) -> Disposition {
-        debug!(wire_out = %self.outbuf.escape_ascii(), "flushing to client");
+        debug!(wire_out = %self.outbuf.escape_ascii(), buf_len = self.outbuf.len(), "flushing to client");
         let mut written = 0;
         while written < self.outbuf.len() {
             match self.stream.write(&self.outbuf[written..]) {
