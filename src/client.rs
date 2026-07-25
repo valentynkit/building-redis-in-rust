@@ -135,6 +135,8 @@ impl Client {
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             self.inbuf.drain(..request.consumed());
             let body = request.body();
+
+            // TODO: we have enum ReplConfSubCommand maybe we should use it to check for GETACK?
             let is_getack = matches!(self.peer_role, PeerRole::Master)
                 && body.clone().into_args().is_some_and(|args| {
                     args.get(1)
