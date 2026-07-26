@@ -1,5 +1,5 @@
 use mio::net::TcpStream;
-use tracing::{Span, debug, error, field, info, info_span, trace, warn};
+use tracing::{debug, error, field, info, info_span, trace, warn, Span};
 
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
@@ -137,9 +137,6 @@ impl Client {
                 match self.peer_role {
                     PeerRole::Normal => self.flush(),
                     PeerRole::Master => {
-                        // TODO: I think we should move the slave offset without replying to client, and
-                        // the ACK should be handled not by req-resp but in before sleep
-                        // todo!()
                         debug!("slave received from master");
                         self.flush()
                     }
@@ -171,15 +168,6 @@ impl Client {
             let consumed = request.consumed();
             self.inbuf.drain(..consumed);
 
-            {
-                let mut server_info = self.server_info.borrow_mut();
-                if matches!(server_info.role(), ServerRole::Slave)
-                    && matches!(self.peer_role, PeerRole::Master)
-                {
-                    server_info.incr_repl_offset(consumed);
-                }
-            }
-
             let body = request.body();
 
             // TODO: we have enum ReplConfSubCommand maybe we should use it to check for GETACK?
@@ -190,6 +178,17 @@ impl Client {
                 });
 
             let outcome = self.run_request(db, body, true);
+
+            // GETACK reads the offset inside run_request, before this command's own
+            // bytes are added — the spec requires the reported offset to exclude the
+            // GETACK command itself, only commands processed before it.
+            if matches!(self.peer_role, PeerRole::Master) {
+                let mut server_info = self.server_info.borrow_mut();
+                if matches!(server_info.role(), ServerRole::Slave) {
+                    server_info.incr_repl_offset(consumed);
+                }
+            }
+
             out.extend(outcome.forwards);
             for resp in outcome.replies {
                 match self.peer_role {
@@ -200,12 +199,7 @@ impl Client {
                         if is_getack {
                             self.write_out(&resp);
                         }
-
-                        // TODO: I think we should move the slave offset without replying to client, and
-                        // the ACK should be handled not by req-resp but in before sleep
-                        trace!(
-                            "replicated write applied from master; slave offset advance pending"
-                        );
+                        trace!("replicated write applied from master");
                     }
                 }
             }
@@ -383,6 +377,36 @@ impl Client {
         let mut reader = io::BufReader::new(&self.stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
+        Ok(line)
+    }
+
+    /// Reads the `+FULLRESYNC ...` line and, if present, the RDB bulk transfer
+    /// (`$<len>\r\n<bytes>`, no trailing CRLF) that follows it — in one buffered
+    /// reader, so any bytes the OS delivered past the RDB payload (e.g. a
+    /// pipelined REPLCONF GETACK) are salvaged into inbuf instead of being
+    /// dropped when a throwaway BufReader would otherwise discard them.
+    pub(crate) fn read_fullresync(&mut self) -> io::Result<String> {
+        let mut reader = io::BufReader::new(&self.stream);
+
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if !line.starts_with("+FULLRESYNC ") {
+            return Ok(line);
+        }
+
+        let mut rdb_header = String::new();
+        reader.read_line(&mut rdb_header)?;
+        let len: usize = rdb_header
+            .trim_start_matches('$')
+            .trim_end()
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad RDB bulk header"))?;
+
+        let mut rdb = vec![0u8; len];
+        reader.read_exact(&mut rdb)?;
+
+        self.inbuf.extend_from_slice(reader.buffer());
+
         Ok(line)
     }
 }
