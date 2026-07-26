@@ -12,12 +12,12 @@ use clap::error;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
-use tracing::{debug, debug_span, error, field, info, info_span, trace, Span};
+use tracing::{Span, debug, debug_span, error, field, info, info_span, trace};
 
 use crate::client::{Client, ClientId, Disposition, PeerRole};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::{client, Cli};
+use crate::{Cli, client};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MASTER: Token = Token(1);
@@ -45,7 +45,7 @@ pub enum NetworkingError {
     HandshakeUnfinished,
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Ord, Eq)]
+#[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Copy, Clone)]
 pub enum ServerRole {
     Master,
     Slave,
@@ -59,11 +59,11 @@ impl ServerRole {
     }
 }
 pub struct ServerInfo {
-    pub role: ServerRole,
-    pub connected_slaves: u32,
-    pub master_replid: String,
-    pub master_repl_offset: i64,
-    pub replica_of: Option<String>,
+    role: ServerRole,
+    connected_slaves: u32,
+    master_replid: String,
+    master_repl_offset: i64,
+    replica_of: Option<String>,
     dir: String,
     dbfilename: String,
 }
@@ -88,6 +88,26 @@ impl ServerInfo {
             dbfilename,
         }
     }
+    pub(crate) fn role(&self) -> ServerRole {
+        self.role
+    }
+
+    pub(crate) fn connected_slaves(&self) -> u32 {
+        self.connected_slaves
+    }
+
+    pub(crate) fn master_replid(&self) -> String {
+        self.master_replid.clone()
+    }
+
+    pub(crate) fn master_repl_offset(&self) -> i64 {
+        self.master_repl_offset
+    }
+
+    pub(crate) fn incr_repl_offset(&mut self, consumed: usize) {
+        self.master_repl_offset += consumed as i64;
+    }
+
     pub fn rdb_path(&self) -> PathBuf {
         Path::new(&self.dir).join(&self.dbfilename)
     }
@@ -375,11 +395,21 @@ impl Server {
             info!(slaves, "replica attached");
         }
 
+        let mut server_info = self.server_info.borrow_mut();
+
+        let mut cmd_buffer: Vec<u8> = vec![];
         for cmd in &to_propagate {
             let mut delivered = 0u64;
+
+            cmd_buffer.clear();
+            cmd.encode(&mut cmd_buffer);
+
+            let offset = cmd_buffer.len();
+            server_info.incr_repl_offset(offset);
+
             for token in &mut self.slaves.iter() {
                 if let Some(slave) = self.clients.get_mut(token) {
-                    slave.write_out(cmd);
+                    slave.write_out_buffer(&cmd_buffer);
                     slave.flush();
                     delivered += 1;
                 }
