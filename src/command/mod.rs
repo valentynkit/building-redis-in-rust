@@ -15,7 +15,7 @@ use crate::db::Db;
 use crate::networking::{ServerInfo, ServerRole};
 use crate::resp::{Propagate, Reply, RespBody};
 use strum::{AsRefStr, Display, EnumString};
-use tracing::{debug, debug_span, error, field, info, Span};
+use tracing::{Span, debug, debug_span, error, field, info};
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -302,7 +302,7 @@ impl CommandKind {
 const EMPTY_RDB: &[u8] = include_bytes!("../../empty.rdb");
 
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
-    let repl_id = server_info.master_replid.clone();
+    let repl_id = server_info.master_replid().clone();
     let out = format!("FULLRESYNC {repl_id} 0");
     let path = server_info.rdb_path();
     debug!(?path, "psync: serving rdb");
@@ -339,13 +339,13 @@ fn handle_repl_getack(
         return Err(CommandError::InvalidArguments);
     }
 
-    if server_info.role != ServerRole::Slave || client_role != PeerRole::Master {
+    if server_info.role() != ServerRole::Slave || client_role != PeerRole::Master {
         error!(
             "replconf getack is expected to happend on  slave from master, current state is invalid for this cmd"
         );
         return Err(CommandError::UnsupportedReplication);
     }
-    let offset = server_info.master_repl_offset;
+    let offset = server_info.master_repl_offset();
     debug!(?offset, "slave sending ACK offset to master");
 
     let resp_body = ["REPLCONF", "ACK", &offset.to_string()]
@@ -360,7 +360,7 @@ fn handle_repl_ack(
     server_info: &ServerInfo,
     client_role: PeerRole,
 ) -> Result<RespBody, CommandError> {
-    if server_info.role != ServerRole::Master || client_role != PeerRole::Slave {
+    if server_info.role() != ServerRole::Master || client_role != PeerRole::Slave {
         error!(
             "replconf ack is expected to happend on master from slave, current state is invalid for this cmd"
         );
@@ -380,7 +380,7 @@ fn repl_conf(
     sub_cmd: Option<&[u8]>,
     arg_value: Option<&[u8]>,
 ) -> HandleCmdResult {
-    if server_info.role != ServerRole::Master && server_info.role != ServerRole::Slave {
+    if server_info.role() != ServerRole::Master && server_info.role() != ServerRole::Slave {
         return Err(CommandError::UnsupportedReplication);
     }
     let Some(sub_cmd) = sub_cmd else {

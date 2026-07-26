@@ -92,6 +92,7 @@ impl RespBody {
     pub fn new_ok() -> Self {
         Self::Simple("OK".into())
     }
+
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Empty => {}

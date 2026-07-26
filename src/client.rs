@@ -1,11 +1,11 @@
 use mio::net::TcpStream;
-use tracing::{debug, error, field, info, info_span, trace, warn, Span};
+use tracing::{Span, debug, error, field, info, info_span, trace, warn};
 
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
 use crate::db::Db;
-use crate::networking::ServerInfo;
-use crate::resp::{self, Frame, Reply, RespBody};
+use crate::networking::{ServerInfo, ServerRole};
+use crate::resp::{self, Reply, RespBody};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -168,7 +168,18 @@ impl Client {
     fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
         let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
-            self.inbuf.drain(..request.consumed());
+            let consumed = request.consumed();
+            self.inbuf.drain(..consumed);
+
+            {
+                let mut server_info = self.server_info.borrow_mut();
+                if matches!(server_info.role(), ServerRole::Slave)
+                    && matches!(self.peer_role, PeerRole::Master)
+                {
+                    server_info.incr_repl_offset(consumed);
+                }
+            }
+
             let body = request.body();
 
             // TODO: we have enum ReplConfSubCommand maybe we should use it to check for GETACK?
@@ -182,11 +193,14 @@ impl Client {
             out.extend(outcome.forwards);
             for resp in outcome.replies {
                 match self.peer_role {
-                    PeerRole::Normal | PeerRole::Slave => self.write_out(&resp),
+                    PeerRole::Normal | PeerRole::Slave => {
+                        self.write_out(&resp);
+                    }
                     PeerRole::Master => {
                         if is_getack {
                             self.write_out(&resp);
                         }
+
                         // TODO: I think we should move the slave offset without replying to client, and
                         // the ACK should be handled not by req-resp but in before sleep
                         trace!(
@@ -220,7 +234,7 @@ impl Client {
     }
 
     fn process_request(
-        &mut self,
+        &self,
         db: &mut Db,
         frame: RespBody,
         allow_block: bool,
@@ -262,8 +276,14 @@ impl Client {
         ReplyOutcome { replies, forwards }
     }
 
-    pub(crate) fn write_out(&mut self, resp: &RespBody) {
+    pub(crate) fn write_out_buffer(&mut self, value: &[u8]) -> usize {
+        write_out_raw(&mut self.outbuf, value)
+    }
+    pub(crate) fn write_out(&mut self, resp: &RespBody) -> usize {
+        let size_before = self.outbuf.len();
+
         resp.encode(&mut self.outbuf);
+        self.outbuf.len() - size_before
     }
 
     pub(crate) fn flush(&mut self) -> Disposition {
@@ -359,12 +379,18 @@ impl Client {
         self.span.record("peer_role", PeerRole::Slave.as_str());
     }
 
-    pub(crate) fn read_line(&mut self) -> io::Result<String> {
+    pub(crate) fn read_line(&self) -> io::Result<String> {
         let mut reader = io::BufReader::new(&self.stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
         Ok(line)
     }
+}
+
+fn write_out_raw(buffer: &mut Vec<u8>, value: &[u8]) -> usize {
+    let written = value.len();
+    buffer.extend_from_slice(value);
+    written
 }
 
 #[cfg(test)]

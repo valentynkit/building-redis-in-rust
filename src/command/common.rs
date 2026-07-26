@@ -91,10 +91,10 @@ fn info_replication(info: &ServerInfo) -> String {
     repl_backlog_size:1048576\r\n\
     repl_backlog_first_byte_offset:0\r\n\
     repl_backlog_histlen:0\r\n",
-        role = info.role.as_str(),
-        connected_slaves = info.connected_slaves,
-        master_replid = info.master_replid,
-        master_repl_offset = info.master_repl_offset
+        role = info.role().as_str(),
+        connected_slaves = info.connected_slaves(),
+        master_replid = info.master_replid(),
+        master_repl_offset = info.master_repl_offset()
     )
 }
 
