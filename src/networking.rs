@@ -434,6 +434,10 @@ impl Server {
             return Err(NetworkingError::HandshakeUnfinished.into());
         }
         master_client.consume(&mut self.db);
+        if matches!(master_client.flush(), Disposition::Drop) {
+            error!(?out, "handshake PSYNC: couldn't flush to master");
+            return Err(NetworkingError::HandshakeUnfinished.into());
+        }
 
         Ok(())
     }
