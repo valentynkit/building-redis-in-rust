@@ -309,9 +309,9 @@ impl Db {
             return Ok(None);
         }
 
-        debug!(%key, "adding waiter");
-        let waiters = self.list_waiters.entry(key).or_default();
         let deadline = timeout.map(|t| self.realtime_ms + t);
+        debug!(%client_id, %key, ?deadline, "list waiter registered");
+        let waiters = self.list_waiters.entry(key).or_default();
         waiters.push_back((client_id, deadline));
         Ok(None)
     }
@@ -442,9 +442,9 @@ impl Db {
         timeout: Option<Duration>,
     ) {
         debug!(
-            ?client_id,
+            %client_id,
             num_keys = positions.len(),
-            "registering stream waiter"
+            "stream waiter registered"
         );
         let deadline = timeout.map(|t| self.realtime_ms + t);
         self.stream_waiters.push(StreamWait {
@@ -522,7 +522,7 @@ impl Db {
                 if let Some(value) = timeout {
                     is_expired = *value <= date_now;
                     if is_expired {
-                        debug!(?client_id, "blpop waiter timed out");
+                        debug!(%client_id, "blpop waiter timed out");
                         out.insert(*client_id, RespBody::Array(None));
                     } else {
                         let deadline = (*value).checked_sub(date_now).expect(
@@ -560,7 +560,7 @@ impl Db {
                 let item = list.pop_front().expect(
                     "list non-empty: checked via list.is_empty() above; only waiters is touched in between, list is untouched until this pop",
                 );
-                debug!(?client_id, %key, "delivering to blpop waiter");
+                debug!(%client_id, %key, "delivering to blpop waiter");
                 out.insert(
                     client_id,
                     RespBody::Array(Some(vec![
@@ -591,13 +591,13 @@ impl Db {
             .into_iter()
             .filter_map(|wait| {
                 if let Ok(Some(resp)) = self.xread_snapshot(&wait.positions) {
-                    debug!(client_id = ?wait.client_id, "delivering to xread waiter");
+                    debug!(client_id = %wait.client_id, "delivering to xread waiter");
                     out.insert(wait.client_id, resp);
                     return None;
                 }
                 if let Some(deadline) = wait.deadline {
                     if deadline <= date_now {
-                        debug!(client_id = ?wait.client_id, "xread waiter timed out");
+                        debug!(client_id = %wait.client_id, "xread waiter timed out");
                         out.insert(wait.client_id, RespBody::Array(None));
                         return None;
                     }
