@@ -1,5 +1,5 @@
 use mio::net::TcpStream;
-use tracing::{debug, error, field, info, info_span, trace, warn, Span};
+use tracing::{Span, debug, error, field, info, info_span, trace, warn};
 
 use crate::command::common::CommandError;
 use crate::command::{ClientInfo, Command};
@@ -129,7 +129,6 @@ impl Client {
                 info!("client disconnected");
                 Disposition::Drop
             }
-            // TODO extract logic
             Ok(n) => {
                 self.inbuf.extend_from_slice(&buf[..n]);
                 to_propagate.extend(self.consume(db));
@@ -162,7 +161,7 @@ impl Client {
 
     /// Drain every complete command from inbuf, then flush replies in one write.
     /// Returns the write commands to replicate to slaves.
-    fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
+    pub(crate) fn consume(&mut self, db: &mut Db) -> Vec<RespBody> {
         let mut out = vec![];
         while let Some(request) = resp::parse_resp(&self.inbuf) {
             let consumed = request.consumed();
