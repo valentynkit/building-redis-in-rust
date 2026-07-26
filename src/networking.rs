@@ -12,12 +12,12 @@ use clap::error;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
-use tracing::{Span, debug, debug_span, error, field, info, info_span, trace};
+use tracing::{debug, debug_span, error, field, info, info_span, trace, Span};
 
 use crate::client::{Client, ClientId, Disposition, PeerRole};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::{Cli, client};
+use crate::{client, Cli};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MASTER: Token = Token(1);
@@ -427,7 +427,7 @@ impl Server {
 
         master_client.write_out(&resp_body);
         master_client.flush();
-        let out = master_client.read_line()?;
+        let out = master_client.read_fullresync()?;
 
         if !out.starts_with("+FULLRESYNC ") {
             error!(?out, "handshake PSYNC: expected +FULLRESYNC");
