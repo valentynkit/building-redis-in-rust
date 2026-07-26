@@ -33,6 +33,14 @@ impl ClientId {
     }
 }
 
+// Renders the bare integer so db-layer logs join to the `conn` span's `id`
+// field (waiter deliveries fire outside the connection's span).
+impl std::fmt::Display for ClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 // Transaction = Multi mode for queuing transactions and executing with EXEC
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ClientMode {
