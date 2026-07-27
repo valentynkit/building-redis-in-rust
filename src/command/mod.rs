@@ -325,14 +325,21 @@ fn wait(
         ServerRole::Master,
         PeerRole::Normal,
     )?;
-    let num_replicas: u32 = 0;
+
+    let num_replicas_err = CommandError::WrongNumber(String::from_utf8_lossy(num_replicas).into());
+
+    let num_replicas: u32 = str::from_utf8(num_replicas)
+        .ok()
+        .and_then(|item| item.parse().ok())
+        .ok_or(num_replicas_err)?;
 
     let Some(_timeout) = get_ttl(&ExpCmd::Px, Some(timeout))? else {
         return Err(CommandError::NotAnInteger);
     };
 
+    let slaves_count = server_info.connected_slaves();
     let repl = if num_replicas == 0 || !allow_block {
-        Reply::readonly(RespBody::Integer(0))
+        Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
     } else {
         Reply::Blocked
     };
