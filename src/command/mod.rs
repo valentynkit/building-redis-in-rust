@@ -7,9 +7,10 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::mem;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::client::{ClientId, ClientMode, PeerRole};
-use crate::command::common::{CommandError, HandleCmdResult};
+use crate::command::common::{CommandError, ExpCmd, HandleCmdResult, get_ttl};
 use crate::command::list::Side;
 use crate::db::Db;
 use crate::networking::{ServerInfo, ServerRole};
@@ -172,6 +173,14 @@ impl Command {
                 args.get(2).map(Vec::as_slice),
             ),
             CommandKind::Psync => psync(&self.client.server_info.borrow()),
+            CommandKind::Wait => wait(
+                db,
+                args[1],
+                args[2],
+                &self.client.server_info.borrow(),
+                client_role,
+                self.client.allow_block,
+            ),
         }?;
 
         let forward = match &reply {
@@ -245,6 +254,7 @@ enum CommandKind {
     Unwatch,
     Replconf,
     Psync,
+    Wait,
 }
 
 impl CommandKind {
@@ -276,6 +286,7 @@ impl CommandKind {
             Self::Info => -1,
             Self::Replconf => -3,
             Self::Psync => 3,
+            Self::Wait => 3,
         }
     }
 
@@ -300,9 +311,36 @@ impl CommandKind {
 }
 
 const EMPTY_RDB: &[u8] = include_bytes!("../../empty.rdb");
+fn wait(
+    db: &mut Db,
+    num_replicas: &[u8],
+    timeout: &[u8],
+    server_info: &ServerInfo,
+    client_role: PeerRole,
+    allow_block: bool,
+) -> HandleCmdResult {
+    validate_roles(
+        server_info.role(),
+        client_role,
+        ServerRole::Master,
+        PeerRole::Normal,
+    )?;
+    let num_replicas: u32 = 0;
 
+    let Some(_timeout) = get_ttl(&ExpCmd::Px, Some(timeout))? else {
+        return Err(CommandError::NotAnInteger);
+    };
+
+    let repl = if num_replicas == 0 || !allow_block {
+        Reply::readonly(RespBody::Integer(0))
+    } else {
+        Reply::Blocked
+    };
+
+    Ok(repl)
+}
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
-    let repl_id = server_info.master_replid().clone();
+    let repl_id = server_info.master_replid();
     let out = format!("FULLRESYNC {repl_id} 0");
     let path = server_info.rdb_path();
     debug!(?path, "psync: serving rdb");
@@ -329,6 +367,24 @@ fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let rdb = RespBody::Rdb(buffer);
     Ok(Reply::Rdb(RespBody::Simple(out), rdb))
 }
+
+fn validate_roles(
+    server_role: ServerRole,
+    peer_role: PeerRole,
+    expected: ServerRole,
+    expected_peer: PeerRole,
+) -> Result<(), CommandError> {
+    if server_role != expected || peer_role != expected_peer {
+        return Err(CommandError::InvalidRoles {
+            server_role: server_role.as_str().to_owned(),
+            peer_role: peer_role.as_str().to_owned(),
+            expected: expected.as_str().to_owned(),
+            expected_peer: expected_peer.as_str().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn handle_repl_getack(
     value: &[u8],
     server_info: &ServerInfo,
@@ -339,12 +395,13 @@ fn handle_repl_getack(
         return Err(CommandError::InvalidArguments);
     }
 
-    if server_info.role() != ServerRole::Slave || client_role != PeerRole::Master {
-        error!(
-            "replconf getack is expected to happend on  slave from master, current state is invalid for this cmd"
-        );
-        return Err(CommandError::UnsupportedReplication);
-    }
+    validate_roles(
+        server_info.role(),
+        client_role,
+        ServerRole::Slave,
+        PeerRole::Master,
+    )?;
+
     let offset = server_info.master_repl_offset();
     debug!(?offset, "slave sending ACK offset to master");
 
