@@ -1,6 +1,7 @@
 mod key_value;
 mod stream_id;
 pub use key_value::{Key, Value};
+use rand::seq::IteratorRandom;
 pub use stream_id::{StreamId, StreamIdSpec};
 
 use std::collections::HashSet;
@@ -91,6 +92,7 @@ pub struct Db {
     client_watches: HashMap<ClientId, ClientWatch>,
     outbox: Vec<Key>,
     stream_waiters: Vec<StreamWait>,
+    monotonic_ms: Duration,
     realtime_ms: Duration,
 }
 
@@ -99,7 +101,7 @@ impl Db {
     // Constructor
     // ---------------------------------------------------------------
 
-    pub fn create(realtime_ms: Duration) -> Self {
+    pub fn create(monotonic_ms: Duration, realtime_ms: Duration) -> Self {
         debug!("db initialized");
         Self {
             keyspace: HashMap::new(),
@@ -109,6 +111,7 @@ impl Db {
             client_watches: HashMap::new(),
             outbox: Vec::new(),
             stream_waiters: Vec::new(),
+            monotonic_ms,
             realtime_ms,
         }
     }
@@ -130,7 +133,6 @@ impl Db {
             Some(_) => Err(CommandError::WrongType(Object::STRING.into())),
         }
     }
-
     fn set(&mut self, key: Key, value: Value) {
         self.make_dirty(&key);
         self.keyspace.insert(key, Object::String(value));
@@ -460,6 +462,29 @@ impl Db {
     // Watcher ops (WATCH / MULTI dirty-tracking)
     // ---------------------------------------------------------------
 
+    // Active Expiration
+    pub fn active_sweep(&mut self, sample_size: usize) -> u32 {
+        let sample_size = sample_size.min(self.expires.len());
+        if sample_size == 0 {
+            return 0;
+        }
+        let sampled_keys: Vec<Key> = self
+            .expires
+            .keys()
+            .sample(&mut rand::rng(), sample_size)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let mut cleaned: u32 = 0;
+        for key in &sampled_keys {
+            if self.expire_clean(key) {
+                cleaned += 1;
+            }
+        }
+
+        cleaned
+    }
     fn client_watch_or_create(&mut self, client_id: ClientId) -> &mut ClientWatch {
         self.client_watches
             .entry(client_id)
@@ -627,8 +652,13 @@ impl Db {
     // Clock
     // ---------------------------------------------------------------
 
-    pub const fn update_time(&mut self, realtime_ms: Duration) {
+    pub const fn update_time(&mut self, monotonic_ms: Duration, realtime_ms: Duration) {
         self.realtime_ms = realtime_ms;
+        self.monotonic_ms = monotonic_ms;
+    }
+
+    pub const fn monotonic_ms(&self) -> Duration {
+        self.monotonic_ms
     }
 
     pub const fn realtime_ms(&self) -> Duration {
@@ -798,7 +828,11 @@ mod test {
         let watcher = ClientId::new(1);
         db.add_watchers(vec![key.clone()], watcher);
 
-        assert!(db.blpop(key, None, ClientId::new(2), true).unwrap().is_none());
+        assert!(
+            db.blpop(key, None, ClientId::new(2), true)
+                .unwrap()
+                .is_none()
+        );
         assert!(!db.is_dirty(watcher));
     }
 
@@ -810,7 +844,10 @@ mod test {
         db.list_append(key.clone(), vec![b"a".to_vec().into()])
             .unwrap();
 
-        let got = db.blpop(key, None, ClientId::new(1), true).unwrap().unwrap();
+        let got = db
+            .blpop(key, None, ClientId::new(1), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(Vec::<u8>::from(got), b"a".to_vec());
     }
 
@@ -824,7 +861,11 @@ mod test {
         let watcher = ClientId::new(1);
         db.add_watchers(vec![key.clone()], watcher);
 
-        assert!(db.blpop(key, None, ClientId::new(2), true).unwrap().is_some());
+        assert!(
+            db.blpop(key, None, ClientId::new(2), true)
+                .unwrap()
+                .is_some()
+        );
         assert!(db.is_dirty(watcher));
     }
 
