@@ -338,12 +338,15 @@ fn wait(
     };
 
     let slaves_count = server_info.connected_slaves();
-    let repl = if num_replicas == 0 || !allow_block {
-        Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
-    } else {
-        Reply::Blocked
-    };
+    /*
+        let repl = if num_replicas == 0 || !allow_block {
+            Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
+        } else {
+            Reply::Blocked
+        };
+    */
 
+    let repl = Reply::readonly(RespBody::Integer(i64::from(slaves_count)));
     Ok(repl)
 }
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
