@@ -175,8 +175,8 @@ impl Command {
             CommandKind::Psync => psync(&self.client.server_info.borrow()),
             CommandKind::Wait => wait(
                 db,
-                args[1],
-                args[2],
+                &args[1],
+                &args[2],
                 &self.client.server_info.borrow(),
                 client_role,
                 self.client.allow_block,
