@@ -53,6 +53,17 @@ pub enum CommandError {
     SlaveUnsupported,
     #[error("This commands are supported only for slave - master replication")]
     UnsupportedReplication,
+    #[error(
+        "invalid roles state, server_role-peer_role; \n actual: '{server_role}'-'{peer_role}';\n expected: '{expected}'-'{expected_peer}'"
+    )]
+    InvalidRoles {
+        server_role: String,
+        peer_role: String,
+        expected: String,
+        expected_peer: String,
+    },
+    #[error("invalid server role: actual - '{actual}, expected - '{expected}'")]
+    InvalidServerRole { actual: String, expected: String },
     #[error("Rdb file doesn't exist")]
     NoRdbFile,
 }
