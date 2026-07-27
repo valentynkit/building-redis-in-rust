@@ -258,7 +258,7 @@ impl Client {
                 forwards.extend(exec_forwards);
             }
             Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
-            Reply::Blocked => {}
+            Reply::Blocked(_) => {}
             Reply::Rdb(sync, rdb) => {
                 info!("replica attached: handshake finished on master side");
                 self.promote_to_slave();

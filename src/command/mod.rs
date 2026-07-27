@@ -174,7 +174,6 @@ impl Command {
             ),
             CommandKind::Psync => psync(&self.client.server_info.borrow()),
             CommandKind::Wait => wait(
-                db,
                 &args[1],
                 &args[2],
                 &self.client.server_info.borrow(),
@@ -312,7 +311,6 @@ impl CommandKind {
 
 const EMPTY_RDB: &[u8] = include_bytes!("../../empty.rdb");
 fn wait(
-    db: &mut Db,
     num_replicas: &[u8],
     timeout: &[u8],
     server_info: &ServerInfo,
@@ -333,20 +331,21 @@ fn wait(
         .and_then(|item| item.parse().ok())
         .ok_or(num_replicas_err)?;
 
-    let Some(_timeout) = get_ttl(&ExpCmd::Px, Some(timeout))? else {
+    let Some(timeout) = get_ttl(&ExpCmd::Px, Some(timeout))? else {
         return Err(CommandError::NotAnInteger);
     };
-
+    let master_offset = server_info.master_repl_offset();
     let slaves_count = server_info.connected_slaves();
-    /*
-        let repl = if num_replicas == 0 || !allow_block {
-            Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
-        } else {
-            Reply::Blocked
-        };
-    */
 
-    let repl = Reply::readonly(RespBody::Integer(i64::from(slaves_count)));
+    let repl = if master_offset == 0 {
+        Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
+    } else if num_replicas == 0 || !allow_block {
+        Reply::readonly(RespBody::Integer(0))
+    } else {
+        // TODO:
+        Reply::Blocked(Some(timeout))
+    };
+
     Ok(repl)
 }
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {

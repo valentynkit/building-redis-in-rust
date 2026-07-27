@@ -13,3 +13,4 @@ strum = { version = "0.28.0", features = ["derive"] }
 thiserror = "2"                                                        # error handling
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rand = "0.10.2"

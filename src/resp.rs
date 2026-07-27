@@ -1,5 +1,7 @@
 // find star,
 
+use std::time::Duration;
+
 use tracing::trace;
 
 use crate::command::common::CommandError;
@@ -206,7 +208,7 @@ pub enum Reply {
     AddTransaction(RespBody),
     ExecTransaction,
     DiscardTransaction(Option<RespBody>),
-    Blocked,
+    Blocked(Option<Duration>),
 }
 
 impl Reply {

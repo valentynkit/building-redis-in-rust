@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::iter;
 use std::os::fd::AsRawFd;
@@ -58,6 +58,57 @@ impl ServerRole {
         }
     }
 }
+
+struct OffsetAckWaiters {
+    // key: ofsset, value: (ClientId, expected ack)
+    client_id: ClientId,
+    expected_ack: u32,
+    deadline: Option<Duration>,
+}
+
+struct OffsetAck {
+    // key: offset, value: number of ack for it, all the higher
+    inner: BTreeMap<i64, u32>,
+    // latest offset with full ack for connected_slaves
+    latest_full_ack: i64,
+}
+
+impl OffsetAck {
+    pub fn new() -> Self {
+        Self {
+            inner: BTreeMap::new(),
+            latest_full_ack: 0,
+        }
+    }
+
+    pub fn increase_ack_count(&mut self, offset: i64, connected_slaves: u32) {
+        // TODO: go through the btree map and find the first one where value = connected_slaves. and
+        // we could remove all the values lower than this, Compaction
+        let entry = self.inner.entry(offset).or_insert_with(|| 0);
+        *entry += 1;
+
+        // COMPACTION
+        for (&key, &value) in self.inner.iter().rev() {
+            if value == connected_slaves {
+                self.latest_full_ack = key;
+                break;
+            }
+        }
+        self.inner = self.inner.split_off(&self.latest_full_ack);
+    }
+    pub fn get_ack_count(&self, offset: i64, connected_slaves: u32) -> u32 {
+        if offset <= self.latest_full_ack {
+            return connected_slaves;
+        }
+
+        if let Some(&received_ack) = self.inner.get(&offset) {
+            received_ack
+        } else {
+            0
+        }
+    }
+}
+
 pub struct ServerInfo {
     role: ServerRole,
     connected_slaves: u32,
@@ -66,6 +117,9 @@ pub struct ServerInfo {
     replica_of: Option<String>,
     dir: String,
     dbfilename: String,
+    // key: offset, value: number of ack for it, all the higher
+    offset_ack: OffsetAck,
+    offset_ack_waiters: BTreeMap<i64, OffsetAckWaiters>,
 }
 
 impl ServerInfo {
@@ -78,6 +132,9 @@ impl ServerInfo {
         dir: String,
         dbfilename: String,
     ) -> Self {
+        let offset_ack = OffsetAck::new();
+        let offset_ack_waiters = BTreeMap::new();
+
         Self {
             role,
             connected_slaves,
@@ -86,13 +143,15 @@ impl ServerInfo {
             replica_of,
             dir,
             dbfilename,
+            offset_ack,
+            offset_ack_waiters,
         }
     }
-    pub(crate) fn role(&self) -> ServerRole {
+    pub(crate) const fn role(&self) -> ServerRole {
         self.role
     }
 
-    pub(crate) fn connected_slaves(&self) -> u32 {
+    pub(crate) const fn connected_slaves(&self) -> u32 {
         self.connected_slaves
     }
 
@@ -100,16 +159,39 @@ impl ServerInfo {
         self.master_replid.clone()
     }
 
-    pub(crate) fn master_repl_offset(&self) -> i64 {
+    pub(crate) const fn master_repl_offset(&self) -> i64 {
         self.master_repl_offset
     }
 
-    pub(crate) fn incr_repl_offset(&mut self, consumed: usize) {
+    pub(crate) const fn incr_repl_offset(&mut self, consumed: usize) {
         self.master_repl_offset += consumed as i64;
     }
 
     pub fn rdb_path(&self) -> PathBuf {
         Path::new(&self.dir).join(&self.dbfilename)
+    }
+}
+
+pub struct ServerConfig {
+    hz: u32,
+    active_expire_enabled: bool,
+    active_expire_percent: u32,
+    active_expire_keys_per_round: usize,
+    client_timeout_s: u32,
+    client_timeout_check_hz: u32,
+}
+
+impl ServerConfig {
+    fn init() -> ServerConfig {
+        Self {
+            // Server tick rate
+            hz: 10,
+            active_expire_enabled: true,
+            active_expire_percent: 25,
+            active_expire_keys_per_round: 20,
+            client_timeout_s: 300,
+            client_timeout_check_hz: 10,
+        }
     }
 }
 
@@ -124,8 +206,9 @@ pub struct Server {
     db: Db,
     cronloops: u64,
     start_time: StartTime,
-    server_info: Rc<RefCell<ServerInfo>>,
-    server_span: Span,
+    info: Rc<RefCell<ServerInfo>>,
+    config: ServerConfig,
+    span: Span,
 }
 
 impl Server {
@@ -149,7 +232,7 @@ impl Server {
             .duration_since(UNIX_EPOCH)
             .context("reading wall clock")?;
         let start_time = StartTime::new(monotonic_ms);
-        let db = Db::create(realtime_ms);
+        let db = Db::create(monotonic_ms.elapsed(), realtime_ms);
         let mut role = ServerRole::Master;
         let mut replica_of_parsed: Option<String> = None;
 
@@ -190,24 +273,46 @@ impl Server {
             db,
             cronloops: 0,
             start_time,
-            server_info,
+            info: server_info,
+            config: ServerConfig::init(),
             master_link: None,
-            server_span,
+            span: server_span,
         })
     }
 
     fn set_current_time(&mut self) -> Result<()> {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let monotonic_ms = Instant::now().elapsed();
+
         let uptime = self.start_time.start_ms_mono.elapsed();
         trace!(?uptime, "clock tick");
 
-        self.db.update_time(realtime_ms);
+        self.db.update_time(monotonic_ms, realtime_ms);
         Ok(())
     }
 
-    // HouseKeeping
-    fn before_sleep(&mut self) -> Option<Duration> {
-        self.cronloops += 1;
+    fn active_expire_cron(&mut self) {
+        let config = &self.config;
+        if !config.active_expire_enabled {
+            return;
+        }
+
+        let start: u128 = self.db.monotonic_ms().as_millis();
+        let mut current: u128 = start;
+        let budget_ms: u128 = u128::from((1000 / config.hz) / 4);
+        while (current - start < budget_ms) {
+            let expired: u32 = self.db.active_sweep(config.active_expire_keys_per_round);
+            let is_below_threshold = (expired * 100)
+                .saturating_div(config.active_expire_keys_per_round as u32)
+                < config.active_expire_percent;
+
+            if is_below_threshold {
+                break;
+            }
+            current = Instant::now().elapsed().as_millis();
+        }
+    }
+    fn clients_key_waiters_cron(&mut self) -> Option<Duration> {
         let HandleWaitersResult {
             replies: list_replies,
             deadline: list_deadline,
@@ -237,10 +342,22 @@ impl Server {
         }
     }
 
+    fn client_ack_waiters_cron(&mut self) -> Option<Duration> {
+        todo!()
+    }
+    // HouseKeeping
+    fn before_sleep(&mut self) -> Option<Duration> {
+        self.cronloops += 1;
+        self.active_expire_cron();
+        let key_waiters_deadline = self.clients_key_waiters_cron();
+        let ack_waiters_deadline = self.client_ack_waiters_cron();
+        key_waiters_deadline.min(ack_waiters_deadline)
+    }
+
     fn slave_handshake(&mut self, port: u16) -> Result<(), anyhow::Error> {
         {
             let master_addr = {
-                let server_info = self.server_info.borrow();
+                let server_info = self.info.borrow();
 
                 if server_info.role == ServerRole::Master {
                     return Ok(());
@@ -277,7 +394,7 @@ impl Server {
     }
 
     pub fn run(mut self, port: u16) -> Result<()> {
-        let _server_guard = self.server_span.clone().entered();
+        let _server_guard = self.span.clone().entered();
         info!("server starting");
         let mut events = Events::with_capacity(MAX_EVENTS);
         self.slave_handshake(port)?;
@@ -315,7 +432,7 @@ impl Server {
             return None;
         }
 
-        let server_info = Rc::clone(&self.server_info);
+        let server_info = Rc::clone(&self.info);
         let client = Client::new(stream, ClientId::new(c_token.0), role, server_info);
         Some(client)
     }
@@ -375,27 +492,27 @@ impl Server {
                 self.slaves.remove(&token);
 
                 let slaves = {
-                    let mut server_info = self.server_info.borrow_mut();
+                    let mut server_info = self.info.borrow_mut();
                     server_info.connected_slaves -= 1;
                     server_info.connected_slaves
                 };
-                self.server_span.record("slaves", slaves as u64);
+                self.span.record("slaves", slaves as u64);
                 info!(slaves, "replica detached");
             }
             return;
         }
         if client.peer_role() == PeerRole::Slave && !self.slaves.contains(&token) {
             let slaves = {
-                let mut server_info = self.server_info.borrow_mut();
+                let mut server_info = self.info.borrow_mut();
                 server_info.connected_slaves += 1;
                 server_info.connected_slaves
             };
             self.slaves.insert(token);
-            self.server_span.record("slaves", slaves as u64);
+            self.span.record("slaves", slaves as u64);
             info!(slaves, "replica attached");
         }
 
-        let mut server_info = self.server_info.borrow_mut();
+        let mut server_info = self.info.borrow_mut();
 
         let mut cmd_buffer: Vec<u8> = vec![];
         for cmd in &to_propagate {
