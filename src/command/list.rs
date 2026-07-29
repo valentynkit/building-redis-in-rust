@@ -120,11 +120,11 @@ pub fn lpop(db: &mut Db, key: &[u8], num: Option<&[u8]>) -> HandleCmdResult {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(realtime_ms)
+        Db::create(Duration::ZERO, realtime_ms)
     }
 
     fn body(reply: Reply) -> RespBody {

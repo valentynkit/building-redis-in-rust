@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
+use std::time::Duration;
 
 const READ_BUF: usize = 512;
 /// Does this client survive the poll, or get dropped?
@@ -72,6 +73,21 @@ struct ReplyOutcome {
     forwards: Vec<RespBody>,
 }
 
+pub struct BlockingState {
+    /* BLOCKED_WAIT */
+    deadline: Option<Duration>, /* Absolute, on the db clock. None = forever. */
+    num_replicas: u32,          /* Number of replicas we are waiting for ACK. */
+    repl_offset: i64,           /* Replication offset to reach. */
+}
+impl BlockingState {
+    const fn new(deadline: Option<Duration>, num_replicas: u32, repl_offset: i64) -> Self {
+        Self {
+            deadline,
+            num_replicas,
+            repl_offset,
+        }
+    }
+}
 pub struct Client {
     id: ClientId,
     stream: TcpStream,
@@ -82,6 +98,9 @@ pub struct Client {
     outbuf: Vec<u8>, // replies waiting to go out
     server_info: Rc<RefCell<ServerInfo>>,
     span: Span,
+    // only meaningful once this client is a slave
+    repl_ack_off: i64,
+    block_state: Option<BlockingState>,
 }
 
 impl Client {
@@ -105,6 +124,7 @@ impl Client {
             addr = %addr,
         );
         span.record("peer_role", peer_role.as_str());
+
         Self {
             id,
             stream,
@@ -115,9 +135,42 @@ impl Client {
             outbuf: Vec::new(),
             server_info,
             span,
+            repl_ack_off: 0,
+            block_state: None,
         }
     }
+    fn block_client(&mut self, deadline: Option<Duration>, repl_offset: i64, num_replicas: u32) {
+        self.block_state = Some(BlockingState::new(deadline, num_replicas, repl_offset));
+    }
 
+    pub(crate) const fn repl_ack_off(&self) -> i64 {
+        self.repl_ack_off
+    }
+
+    pub(crate) const fn is_ack_blocked(&self) -> bool {
+        self.block_state.is_some()
+    }
+
+    /// Settle a parked WAIT against the replicas' ack offsets. Queues the reply
+    /// and clears the block once enough replicas caught up or the deadline
+    /// passed; otherwise returns the time left on it.
+    pub(crate) fn settle_ack_block(&mut self, acks: &[i64], now: Duration) -> Option<Duration> {
+        let state = self.block_state.as_ref()?;
+        // TODO: nitty optimization, maybe order acks, so we will not count through all, but maybe
+        // just stop after some acks because we now the count and now how much elements that have
+        // lower ack are left or something like that.
+        let reached = acks.iter().filter(|&&off| off >= state.repl_offset).count();
+        let remaining = state.deadline.map(|d| d.saturating_sub(now));
+
+        if reached < state.num_replicas as usize && remaining != Some(Duration::ZERO) {
+            return remaining;
+        }
+
+        debug!(reached, "WAIT satisfied");
+        self.block_state = None;
+        self.write_out(&RespBody::Integer(reached as i64));
+        None
+    }
     /// Poller reported this client readable: read, parse, run, reply.
     pub(crate) fn on_readable(&mut self, db: &mut Db) -> (Disposition, Vec<RespBody>) {
         let mut stream = &self.stream;
@@ -258,7 +311,23 @@ impl Client {
                 forwards.extend(exec_forwards);
             }
             Reply::DiscardTransaction(resp) => replies.push(self.discard_transaction(db, resp)),
-            Reply::Blocked(_) => {}
+            Reply::Blocked => {}
+            // The command layer has no clock, so it hands back a timeout and
+            // the deadline is anchored here, against the same db clock the
+            // waiter crons read.
+            Reply::BlockedOnAck {
+                timeout,
+                num_replicas,
+                repl_offset,
+            } => self.block_client(
+                timeout.map(|t| db.realtime_ms() + t),
+                repl_offset,
+                num_replicas,
+            ),
+            Reply::AckOffset(offset) => {
+                trace!(offset, "replica ack offset recorded");
+                self.repl_ack_off = offset;
+            }
             Reply::Rdb(sync, rdb) => {
                 info!("replica attached: handshake finished on master side");
                 self.promote_to_slave();
@@ -425,14 +494,14 @@ mod test {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::rc::Rc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("SystemTime::now should work with durion since UNIX_EPOCH");
 
-        Db::create(realtime_ms)
+        Db::create(Duration::ZERO, realtime_ms)
     }
 
     /// Encode a command as a RESP array of bulk strings — what real clients send.
@@ -459,6 +528,7 @@ mod test {
             0,
             "0".repeat(40),
             0,
+            false,
             None,
             ".".into(),
             "dump.rdb".into(),
@@ -530,6 +600,51 @@ mod test {
         let mut got = Vec::new();
         peer.read_to_end(&mut got).unwrap();
         assert_eq!(got, b"+PONG\r\n+PONG\r\n"); // exactly two, not three
+    }
+
+    /// WAIT is settled by the event loop, not by the command: the block stays
+    /// parked while replicas lag and pays out the tally once they catch up.
+    #[test]
+    fn wait_settles_once_replicas_reach_the_offset() {
+        let (mut peer, mut client) = pair();
+        let now = Duration::ZERO;
+        client.block_client(Some(Duration::from_millis(500)), 100, 2);
+
+        // One replica at the offset, one behind it: still short, stays parked.
+        assert_eq!(
+            client.settle_ack_block(&[100, 40], now),
+            Some(Duration::from_millis(500))
+        );
+        assert!(client.is_ack_blocked());
+
+        // Second replica overtakes the offset — an ACK past it counts too.
+        assert_eq!(client.settle_ack_block(&[100, 120], now), None);
+        assert!(!client.is_ack_blocked());
+
+        client.flush();
+        drop(client);
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert_eq!(got, b":2\r\n");
+    }
+
+    /// An expired deadline pays out whatever the tally is, rather than holding
+    /// out for a count that may never arrive.
+    #[test]
+    fn wait_times_out_with_the_partial_count() {
+        let (mut peer, mut client) = pair();
+        client.block_client(Some(Duration::from_millis(500)), 100, 3);
+
+        assert_eq!(
+            client.settle_ack_block(&[100], Duration::from_millis(500)),
+            None
+        );
+
+        client.flush();
+        drop(client);
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert_eq!(got, b":1\r\n");
     }
 
     #[test]

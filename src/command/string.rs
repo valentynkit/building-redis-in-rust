@@ -1,5 +1,5 @@
 use crate::{
-    command::common::{parse_ttl, HandleCmdResult},
+    command::common::{HandleCmdResult, parse_ttl},
     db::{Db, Key},
     resp::{Reply, RespBody},
 };
@@ -41,7 +41,7 @@ mod test {
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(realtime_ms)
+        Db::create(Duration::ZERO, realtime_ms)
     }
 
     fn body(reply: Reply) -> RespBody {
@@ -79,7 +79,7 @@ mod test {
         )
         .unwrap();
 
-        db.update_time(db.realtime_ms() + Duration::from_secs(2));
+        db.update_time(db.monotonic_ms(), db.realtime_ms() + Duration::from_secs(2));
 
         let resp = body(get(&mut db, b"greeting".as_ref()).unwrap());
         assert!(matches!(resp, RespBody::Bulk(None)));

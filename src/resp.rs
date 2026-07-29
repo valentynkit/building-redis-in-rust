@@ -208,7 +208,16 @@ pub enum Reply {
     AddTransaction(RespBody),
     ExecTransaction,
     DiscardTransaction(Option<RespBody>),
-    Blocked(Option<Duration>),
+    Blocked,
+    /// WAIT parked: the reply is decided by the event loop, which is the only
+    /// place that can see the replicas' ack offsets.
+    BlockedOnAck {
+        timeout: Option<Duration>,
+        num_replicas: u32,
+        repl_offset: i64,
+    },
+    /// REPLCONF ACK from a replica — records its offset, answers nothing.
+    AckOffset(i64),
 }
 
 impl Reply {
