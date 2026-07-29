@@ -335,13 +335,6 @@ fn wait(
         return Err(CommandError::NotAnInteger);
     };
     let master_offset = server_info.master_repl_offset();
-    let slaves_count = server_info.connected_slaves();
-
-    // Nothing has been propagated yet, so every attached replica is trivially
-    // in sync — answer without a round trip.
-    if master_offset == 0 {
-        return Ok(Reply::readonly(RespBody::Integer(i64::from(slaves_count))));
-    }
 
     // Inside EXEC nothing may block, and the tally isn't reachable from here.
     if !allow_block {
