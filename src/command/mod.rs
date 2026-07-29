@@ -7,7 +7,6 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::mem;
 use std::rc::Rc;
-use std::time::Duration;
 
 use crate::client::{ClientId, ClientMode, PeerRole};
 use crate::command::common::{CommandError, ExpCmd, HandleCmdResult, get_ttl};
@@ -125,12 +124,11 @@ impl Command {
         let args = mem::take(&mut self.args);
         let client_id = self.client.id;
         let client_role = self.client.role;
+        let server_info = &mut *self.client.server_info.borrow_mut();
         let reply = match self.kind {
-            CommandKind::Info => common::info(
-                client_id,
-                args.get(1).map(Vec::as_slice),
-                &self.client.server_info.borrow(),
-            ),
+            CommandKind::Info => {
+                common::info(client_id, args.get(1).map(Vec::as_slice), server_info)
+            }
             CommandKind::Ping => Ok(cmd_ping()),
             CommandKind::Echo => Ok(cmd_echo(&args[1])),
             CommandKind::Get => string::get(db, &args[1]),
@@ -167,16 +165,17 @@ impl Command {
             CommandKind::Unwatch => Ok(common::unwatch(db, client_id)),
             CommandKind::Replconf => repl_conf(
                 client_id,
-                &self.client.server_info.borrow(),
+                server_info,
                 client_role,
                 args.get(1).map(Vec::as_slice),
                 args.get(2).map(Vec::as_slice),
             ),
-            CommandKind::Psync => psync(&self.client.server_info.borrow()),
+            CommandKind::Psync => psync(server_info),
             CommandKind::Wait => wait(
+                client_id,
                 &args[1],
                 &args[2],
-                &self.client.server_info.borrow(),
+                server_info,
                 client_role,
                 self.client.allow_block,
             ),
@@ -311,9 +310,10 @@ impl CommandKind {
 
 const EMPTY_RDB: &[u8] = include_bytes!("../../empty.rdb");
 fn wait(
+    client_id: ClientId,
     num_replicas: &[u8],
     timeout: &[u8],
-    server_info: &ServerInfo,
+    server_info: &mut ServerInfo,
     client_role: PeerRole,
     allow_block: bool,
 ) -> HandleCmdResult {
@@ -337,17 +337,37 @@ fn wait(
     let master_offset = server_info.master_repl_offset();
     let slaves_count = server_info.connected_slaves();
 
-    let repl = if master_offset == 0 {
-        Reply::readonly(RespBody::Integer(i64::from(slaves_count)))
-    } else if num_replicas == 0 || !allow_block {
-        Reply::readonly(RespBody::Integer(0))
-    } else {
-        // TODO:
-        Reply::Blocked(Some(timeout))
-    };
+    // Nothing has been propagated yet, so every attached replica is trivially
+    // in sync — answer without a round trip.
+    if master_offset == 0 {
+        return Ok(Reply::readonly(RespBody::Integer(i64::from(slaves_count))));
+    }
 
-    Ok(repl)
+    // Inside EXEC nothing may block, and the tally isn't reachable from here.
+    if !allow_block {
+        return Ok(Reply::readonly(RespBody::Integer(0)));
+    }
+
+    // The ack offsets live on the replica clients, which only the event loop
+    // owns — so WAIT never answers here. It registers the block and asks for
+    // fresh ACKs; before_sleep settles it, on the same tick if it's already met.
+    server_info.repl_request_ack_from_slaves();
+    info!(
+        ?client_id,
+        ?master_offset,
+        ?num_replicas,
+        ?timeout,
+        "WAIT parked on replica acks"
+    );
+
+    Ok(Reply::BlockedOnAck {
+        // WAIT with a 0 timeout waits forever, like redis.
+        timeout: (!timeout.is_zero()).then_some(timeout),
+        num_replicas,
+        repl_offset: master_offset,
+    })
 }
+
 fn psync(server_info: &ServerInfo) -> HandleCmdResult {
     let repl_id = server_info.master_replid();
     let out = format!("FULLRESYNC {repl_id} 0");
@@ -425,18 +445,28 @@ fn handle_repl_ack(
     offset: &[u8],
     server_info: &ServerInfo,
     client_role: PeerRole,
-) -> Result<RespBody, CommandError> {
-    if server_info.role() != ServerRole::Master || client_role != PeerRole::Slave {
-        error!(
-            "replconf ack is expected to happend on master from slave, current state is invalid for this cmd"
-        );
+) -> HandleCmdResult {
+    validate_roles(
+        server_info.role(),
+        client_role,
+        ServerRole::Master,
+        PeerRole::Slave,
+    )?;
 
+    let offset_err = CommandError::WrongNumber(String::from_utf8_lossy(offset).into());
+
+    let offset: i64 = str::from_utf8(offset)
+        .ok()
+        .and_then(|item| item.parse().ok())
+        .ok_or(offset_err)?;
+
+    if offset > server_info.master_repl_offset() {
+        error!(client_offset = ?offset, master_offset = ?server_info.master_repl_offset(), "client offset is bigger than current master, invalid state");
         return Err(CommandError::UnsupportedReplication);
     }
 
-    // TODO: validate offset from slave
     debug!(?offset, "master received ACK offset from slave");
-    Ok(RespBody::Empty)
+    Ok(Reply::AckOffset(offset))
 }
 
 fn repl_conf(
@@ -457,11 +487,13 @@ fn repl_conf(
 
     let resp = match sub_cmd {
         ReplConfSubCommands::ListeningPort | ReplConfSubCommands::Capa => RespBody::new_ok(),
+        // Not a reply to the replica — it mutates that replica's tracked offset,
+        // so it returns its own Reply rather than a body to write back.
         ReplConfSubCommands::Ack => {
             let Some(arg_value) = arg_value else {
                 return Err(CommandError::InvalidArguments);
             };
-            handle_repl_ack(arg_value, server_info, client_role)?
+            return handle_repl_ack(arg_value, server_info, client_role);
         }
         ReplConfSubCommands::GetAck => {
             let Some(arg_value) = arg_value else {

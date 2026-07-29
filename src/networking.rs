@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::iter;
 use std::os::fd::AsRawFd;
@@ -8,16 +8,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use clap::error;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tracing::{Span, debug, debug_span, error, field, info, info_span, trace};
 
+use crate::Cli;
 use crate::client::{Client, ClientId, Disposition, PeerRole};
 use crate::db::{Db, HandleWaitersResult};
 use crate::resp::RespBody;
-use crate::{Cli, client};
 const ADDR: &str = "127.0.0.1";
 const LISTENER: Token = Token(0);
 const MASTER: Token = Token(1);
@@ -59,67 +58,15 @@ impl ServerRole {
     }
 }
 
-struct OffsetAckWaiters {
-    // key: ofsset, value: (ClientId, expected ack)
-    client_id: ClientId,
-    expected_ack: u32,
-    deadline: Option<Duration>,
-}
-
-struct OffsetAck {
-    // key: offset, value: number of ack for it, all the higher
-    inner: BTreeMap<i64, u32>,
-    // latest offset with full ack for connected_slaves
-    latest_full_ack: i64,
-}
-
-impl OffsetAck {
-    pub fn new() -> Self {
-        Self {
-            inner: BTreeMap::new(),
-            latest_full_ack: 0,
-        }
-    }
-
-    pub fn increase_ack_count(&mut self, offset: i64, connected_slaves: u32) {
-        // TODO: go through the btree map and find the first one where value = connected_slaves. and
-        // we could remove all the values lower than this, Compaction
-        let entry = self.inner.entry(offset).or_insert_with(|| 0);
-        *entry += 1;
-
-        // COMPACTION
-        for (&key, &value) in self.inner.iter().rev() {
-            if value == connected_slaves {
-                self.latest_full_ack = key;
-                break;
-            }
-        }
-        self.inner = self.inner.split_off(&self.latest_full_ack);
-    }
-    pub fn get_ack_count(&self, offset: i64, connected_slaves: u32) -> u32 {
-        if offset <= self.latest_full_ack {
-            return connected_slaves;
-        }
-
-        if let Some(&received_ack) = self.inner.get(&offset) {
-            received_ack
-        } else {
-            0
-        }
-    }
-}
-
 pub struct ServerInfo {
     role: ServerRole,
     connected_slaves: u32,
     master_replid: String,
     master_repl_offset: i64,
+    get_ack_from_slaves: bool,
     replica_of: Option<String>,
     dir: String,
     dbfilename: String,
-    // key: offset, value: number of ack for it, all the higher
-    offset_ack: OffsetAck,
-    offset_ack_waiters: BTreeMap<i64, OffsetAckWaiters>,
 }
 
 impl ServerInfo {
@@ -128,24 +75,25 @@ impl ServerInfo {
         connected_slaves: u32,
         master_replid: String,
         master_repl_offset: i64,
+        get_ack_from_slaves: bool,
         replica_of: Option<String>,
         dir: String,
         dbfilename: String,
     ) -> Self {
-        let offset_ack = OffsetAck::new();
-        let offset_ack_waiters = BTreeMap::new();
-
         Self {
             role,
             connected_slaves,
             master_replid,
             master_repl_offset,
+            get_ack_from_slaves,
             replica_of,
             dir,
             dbfilename,
-            offset_ack,
-            offset_ack_waiters,
         }
+    }
+
+    pub(crate) fn repl_request_ack_from_slaves(&mut self) {
+        self.get_ack_from_slaves = true;
     }
     pub(crate) const fn role(&self) -> ServerRole {
         self.role
@@ -249,6 +197,7 @@ impl Server {
             0,
             "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_owned(),
             0,
+            false,
             replica_of_parsed,
             cli.dir().into(),
             cli.dbfilename().into(),
@@ -300,7 +249,7 @@ impl Server {
         let start: u128 = self.db.monotonic_ms().as_millis();
         let mut current: u128 = start;
         let budget_ms: u128 = u128::from((1000 / config.hz) / 4);
-        while (current - start < budget_ms) {
+        while current - start < budget_ms {
             let expired: u32 = self.db.active_sweep(config.active_expire_keys_per_round);
             let is_below_threshold = (expired * 100)
                 .saturating_div(config.active_expire_keys_per_round as u32)
@@ -342,16 +291,105 @@ impl Server {
         }
     }
 
+    /// Settle every client parked in WAIT against the replicas' latest ACK
+    /// offsets. This is the only place that can see both sides, so it owns the
+    /// counting entirely — WAIT itself just registers the block.
     fn client_ack_waiters_cron(&mut self) -> Option<Duration> {
-        todo!()
+        let acks: Vec<i64> = self
+            .slaves
+            .iter()
+            .filter_map(|token| self.clients.get(token))
+            .map(Client::repl_ack_off)
+            .collect();
+
+        let now = self.db.realtime_ms();
+        let mut nearest_deadline: Option<Duration> = None;
+        let mut dropped: Vec<Token> = vec![];
+
+        // TODO: do we really need to loop through the clients, or maybe we could loop through just
+        // slaves? and get self.clients by token.
+        for (token, client) in &mut self.clients {
+            if !client.is_ack_blocked() {
+                continue;
+            }
+            match client.settle_ack_block(&acks, now) {
+                Some(remaining) => {
+                    nearest_deadline = Some(
+                        nearest_deadline.map_or(remaining, |cur: Duration| cur.min(remaining)),
+                    );
+                }
+                None => {
+                    let _g = client.span().entered();
+                    debug!("delivering WAIT reply");
+                    if matches!(client.flush(), Disposition::Drop) {
+                        dropped.push(*token);
+                    }
+                }
+            }
+        }
+
+        // TODO: what about self.slaves? shouldn't we remove it by token?
+        for token in dropped {
+            info!(?token, "waiter disconnected mid-flush; removed");
+            self.db.remove_watcher(ClientId::new(token.0));
+            self.clients.remove(&token);
+        }
+
+        nearest_deadline
     }
+
+    /// One GETACK per event-loop tick for every client that blocked in WAIT
+    /// since the last one — grouped, so N waiters cost one round trip.
+    fn get_ack_from_slaves_cron(&mut self) {
+        {
+            let server_info = self.info.borrow();
+            if !server_info.get_ack_from_slaves || server_info.role() != ServerRole::Master {
+                return;
+            }
+        }
+
+        // No slaves means nothing goes on the wire, so the offset must not move.
+        if self.slaves.is_empty() {
+            self.info.borrow_mut().get_ack_from_slaves = false;
+            return;
+        }
+
+        let mut cmd_buffer = Vec::new();
+        ["REPLCONF", "GETACK", "*"]
+            .into_iter()
+            .collect::<RespBody>()
+            .encode(&mut cmd_buffer);
+
+        for token in &self.slaves {
+            if let Some(slave) = self.clients.get_mut(token) {
+                slave.write_out_buffer(&cmd_buffer);
+                slave.flush();
+            }
+        }
+
+        let mut server_info = self.info.borrow_mut();
+        // The offset tracks the replication stream, not deliveries: one GETACK
+        // advances it once no matter how many slaves it reached. Slaves count
+        // these bytes too, so skipping it makes their ACKs overtake the master.
+        server_info.incr_repl_offset(cmd_buffer.len());
+        server_info.get_ack_from_slaves = false;
+        debug!(slaves = self.slaves.len(), "GETACK broadcast to replicas");
+    }
+
     // HouseKeeping
     fn before_sleep(&mut self) -> Option<Duration> {
         self.cronloops += 1;
         self.active_expire_cron();
+        self.get_ack_from_slaves_cron();
         let key_waiters_deadline = self.clients_key_waiters_cron();
         let ack_waiters_deadline = self.client_ack_waiters_cron();
-        key_waiters_deadline.min(ack_waiters_deadline)
+
+        // Not `.min()`: on Option that orders None first, so one absent deadline
+        // would swallow the other and poll would block past the live timeout.
+        match (key_waiters_deadline, ack_waiters_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn slave_handshake(&mut self, port: u16) -> Result<(), anyhow::Error> {

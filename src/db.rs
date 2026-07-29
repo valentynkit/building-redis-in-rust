@@ -715,7 +715,7 @@ mod test {
 
     fn db() -> Db {
         let realtime_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        Db::create(realtime_ms)
+        Db::create(Duration::ZERO, realtime_ms)
     }
 
     #[test]
@@ -765,7 +765,7 @@ mod test {
         let now = db.realtime_ms();
         db.setex(key.clone(), b"hello".to_vec().into(), Some(now));
 
-        db.update_time(now + Duration::from_millis(1));
+        db.update_time(db.monotonic_ms(), now + Duration::from_millis(1));
 
         assert!(db.as_string(&key).unwrap().is_none());
     }
@@ -1020,7 +1020,7 @@ mod test {
             vec![(key, StreamId::ZERO)],
             Some(Duration::from_millis(1)),
         );
-        db.update_time(now + Duration::from_millis(2));
+        db.update_time(db.monotonic_ms(), now + Duration::from_millis(2));
 
         let HandleWaitersResult { mut replies, .. } = db.handle_stream_waiters();
         let resp = replies.remove(&client_id).unwrap();
