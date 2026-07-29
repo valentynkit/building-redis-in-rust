@@ -81,11 +81,11 @@ pub fn xread(
         BlockMode::NotBlocking => Reply::readonly(RespBody::Array(None)),
         BlockMode::Forever => {
             db.xread_wait(client_id, positions, None);
-            Reply::Blocked(None)
+            Reply::Blocked
         }
         BlockMode::Timeout(timeout) => {
             db.xread_wait(client_id, positions, Some(timeout));
-            Reply::Blocked(None)
+            Reply::Blocked
         }
     };
 
