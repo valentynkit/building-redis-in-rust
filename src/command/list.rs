@@ -80,7 +80,7 @@ pub fn blpop(
             RespBody::from(item),
         ]))),
         // No value and we're allowed to block: the waiter is registered, reply later.
-        None if allow_block => Reply::Blocked(None),
+        None if allow_block => Reply::Blocked,
         // No value and blocking is disabled (inside EXEC): act as an immediate
         // timeout — nil array, nothing mutated, nothing to replicate.
         None => Reply::readonly(RespBody::Array(None)),
@@ -219,6 +219,6 @@ mod test {
     fn blpop_blocks_when_list_is_empty() {
         let mut db = db();
         let reply = blpop(&mut db, b"mylist".as_ref(), None, ClientId::new(1), true).unwrap();
-        assert!(matches!(reply, Reply::Blocked(None)));
+        assert!(matches!(reply, Reply::Blocked));
     }
 }
